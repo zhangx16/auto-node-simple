@@ -1,0 +1,12 @@
+data
+assets
+.git
+.env
+.env.*
+__pycache__
+**/__pycache__
+tests
+backups
+*.db
+*.bak
+*.log

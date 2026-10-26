@@ -1,0 +1,18 @@
+{
+  "sing-box-amd64": {
+    "sha256": "047a747e12037f0dcb6e6a12292ab2dc43cfe7db8652cdb2f263868e51adf077",
+    "version": "1.14.3"
+  },
+  "sing-box-arm64": {
+    "sha256": "e338a90e2ef995c3bff0166cca1412a51ff55612211615cc6c6b80cd04525e2a",
+    "version": "1.14.3"
+  },
+  "cloudflared-amd64": {
+    "sha256": "ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42",
+    "version": "2026.10.4"
+  },
+  "cloudflared-arm64": {
+    "sha256": "2b7203b4fb0ba28a0c1e12f8855ce2c25f76d266a8d5edafac5540b6812acff6",
+    "version": "2026.10.4"
+  }
+}

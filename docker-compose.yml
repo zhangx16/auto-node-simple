@@ -1,0 +1,18 @@
+services:
+  web:
+    build: .
+    container_name: auto-node-simple
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18901/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    ports:
+      - "127.0.0.1:18901:18901"
+    volumes:
+      - ./data:/app/data
+      - ./assets:/app/assets:ro
+    environment:
+      PANEL_URL: ${PANEL_URL:-http://localhost:18901}
+      TZ: ${TZ:-UTC}
