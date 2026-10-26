@@ -26,10 +26,21 @@ el('subs').onclick=async e=>{const b=e.target.closest('[data-sub-action]');if(!b
 
 
 const nodeOpened=new Set();
+function repairInfo(n){
+ const r=n.repair||{};if(!r.configured)return '<p class="hint">自动修复未开启，需在目标服务器执行一次安装命令。</p>';
+ const state=!r.enabled?'已停用':r.paused?'达到上限，已暂停':!r.last_report?'等待安装 / 首次巡检':Date.now()/1000-r.last_report>180?'巡检超时':'巡检运行中';
+ const probe={ok:'转发正常',failed:'转发失败',unavailable:'探测组件不可用',unknown:'等待测活'}[r.probe_status]||'等待测活';
+ const result={core_restarted:'核心已重启',tunnel_restarted:'隧道已重启',core_and_tunnel_restarted:'核心及隧道已重启',restart_failed:'重启失败',shared_core_cooldown:'共享核心冷却中'}[r.last_result]||'';
+ return `<p class="hint">自动修复：${state} · ${probe}${r.latency_ms!=null?' · '+r.latency_ms+' ms':''} · 已授权 ${r.repair_count} 次 · 本地连续失败 ${r.local_failures} 次${n.protocol==='argo'?' · 公网 WS 连续失败 '+r.public_failures+' 次':''}${result?' · '+result:''}<br>最后巡检：${r.last_report?new Date(r.last_report*1000).toLocaleString('zh-CN'):'尚未收到'}${r.last_repair?' · 最近修复：'+new Date(r.last_repair*1000).toLocaleString('zh-CN'):''}</p>${r.probe_error?`<p class="node-warning">${esc(r.probe_error)}</p>`:''}`;
+}
+function repairButtons(n){
+ const r=n.repair||{};
+ return `<button class="secondary" data-node-action="repair-setup" data-id="${n.id}">${r.configured?'重装巡检':'开启自动修复'}</button>${r.configured?`<button class="secondary" data-node-action="repair-${r.enabled&&!r.paused?'disable':'resume'}" data-id="${n.id}">${r.enabled&&!r.paused?'停用修复':r.paused?'解除暂停 / 重新计数':'启用修复'}</button>`:''}`;
+}
 function drawNodes(){
  document.querySelectorAll('[data-managed-node]').forEach(d=>{if(d.open)nodeOpened.add(d.dataset.managedNode);else nodeOpened.delete(d.dataset.managedNode);});
  el('managed-count').textContent=' · '+installed.length+' 个';
- el('managed-nodes').innerHTML=installed.length?installed.map(n=>`<details class="managed-node" data-managed-node="${n.id}" ${nodeOpened.has(n.id)?'open':''}><summary><strong>${esc(n.name)}</strong><span class="status">${esc({argo:'Argo',reality:'Reality Vision',hysteria2:'Hysteria2'}[n.protocol])}</span></summary><p class="hint">${esc(n.address)}:${n.client_port} · 监听 ${n.port||'首次编辑时读取'}${n.pending_update?' · 更新'+(n.pending_update.expired?'已过期':n.pending_update.status==='failed'?'执行失败':'待执行')+'，目标监听 '+n.pending_update.port:''}</p><textarea readonly rows="3" aria-label="节点链接">${esc(n.uri)}</textarea><div class="actions"><button class="secondary" data-node-action="copy" data-id="${n.id}">复制链接</button><button class="secondary" data-node-action="edit" data-id="${n.id}" ${n.pending_update?'disabled':''}>编辑</button>${n.pending_update?`<button class="secondary" data-node-action="cancel" data-id="${n.id}">取消更新</button>`:''}<button class="secondary" data-node-action="delete" data-id="${n.id}">删除节点</button></div>${n.pending_update?.error?`<p class="node-warning">${esc(n.pending_update.error)}</p>`:''}${n.pending_update?'<p class="hint">请执行生成的更新命令，成功回传后更新节点和订阅。如命令丢失，确认未执行后取消，再重新编辑。</p>':''}</details>`).join(''):'<p class="hint">暂无节点，安装成功后自动显示。</p>';
+ el('managed-nodes').innerHTML=installed.length?installed.map(n=>`<details class="managed-node" data-managed-node="${n.id}" ${nodeOpened.has(n.id)?'open':''}><summary><strong>${esc(n.name)}</strong><span class="status">${esc({argo:'Argo',reality:'Reality Vision',hysteria2:'Hysteria2'}[n.protocol])}</span></summary><p class="hint">${esc(n.address)}:${n.client_port} · 监听 ${n.port||'首次编辑时读取'}${n.pending_update?' · 更新'+(n.pending_update.expired?'已过期':n.pending_update.status==='failed'?'执行失败':'待执行')+'，目标监听 '+n.pending_update.port:''}</p>${repairInfo(n)}<textarea readonly rows="3" aria-label="节点链接">${esc(n.uri)}</textarea><div class="actions"><button class="secondary" data-node-action="copy" data-id="${n.id}">复制链接</button><button class="secondary" data-node-action="edit" data-id="${n.id}" ${n.pending_update?'disabled':''}>编辑</button>${n.pending_update?`<button class="secondary" data-node-action="cancel" data-id="${n.id}">取消更新</button>`:''}<button class="secondary" data-node-action="delete" data-id="${n.id}">删除节点</button>${repairButtons(n)}</div>${n.pending_update?.error?`<p class="node-warning">${esc(n.pending_update.error)}</p>`:''}${n.pending_update?'<p class="hint">请执行生成的更新命令，成功回传后更新节点和订阅。如命令丢失，确认未执行后取消，再重新编辑。</p>':''}</details>`).join(''):'<p class="hint">暂无节点，安装成功后自动显示。</p>';
 }
 el('node-close').onclick=()=>el('node-dialog').close();
 el('node-client-port').oninput=()=>nodePortEdited=true;
@@ -37,7 +48,11 @@ el('node-port').oninput=()=>{if(editingNode?.protocol!=='argo'&&!nodePortEdited)
 el('managed-nodes').onclick=async e=>{
  const b=e.target.closest('[data-node-action]');if(!b)return;const n=installed.find(n=>n.id===b.dataset.id);b.disabled=true;
  try{if(b.dataset.nodeAction==='copy'){await copy(n.uri,b);return;}
- if(b.dataset.nodeAction==='delete'){if(confirm('删除节点“'+n.name+'”？将从面板及所有订阅中移除，并使相关安装和更新命令失效。服务器上的服务、Cloudflare 隧道和 DNS 会保留，需另行清理。')){await api('/api/nodes/'+n.id,undefined,'DELETE');nodeOpened.delete(n.id);await load();}return;}
+ if(b.dataset.nodeAction==='repair-setup'){
+ if(n.repair?.configured&&!confirm('重新生成会立即撤销旧巡检凭据，需重新在目标服务器安装。继续？'))return;
+ const r=await api('/api/nodes/'+n.id+'/repair/setup',{});el('command').value=r.command;el('command-hostname').textContent='请在此节点服务器以 root 执行，安装每分钟巡检。连续 3 次失败后重启原服务，5 分钟冷却，1 小时最多 3 次后暂停。仅支持本项目安装的协议服务；旧项目迁入节点需先迁移服务。';el('command-section').hidden=false;el('command-section').scrollIntoView({block:'nearest'});await load();return;}
+ if(['repair-disable','repair-resume'].includes(b.dataset.nodeAction)){await api('/api/nodes/'+n.id+'/repair/'+b.dataset.nodeAction.slice(7),{});await load();return;}
+ if(b.dataset.nodeAction==='delete'){if(confirm('删除节点“'+n.name+'”？将从面板及所有订阅中移除，并使相关安装和更新命令失效。巡检凭据也会失效。服务器上的服务、巡检任务、Cloudflare 隧道和 DNS 会保留，需另行清理。')){await api('/api/nodes/'+n.id,undefined,'DELETE');nodeOpened.delete(n.id);await load();}return;}
  if(b.dataset.nodeAction==='cancel'){if(confirm('仅在更新命令尚未执行时取消。若已在服务器执行，请先核对实际端口；取消不会回滚远端。继续？')){await api('/api/nodes/'+n.id+'/cancel-update',{});await load();}return;}
  editingNode=await api('/api/nodes/'+n.id);nodePortEdited=editingNode.client_port!==editingNode.port;
  el('node-name').value=editingNode.edit_name;el('node-port').value=editingNode.port;el('node-client-port').value=editingNode.client_port;el('node-address').value=editingNode.address;el('node-sni').value=editingNode.sni;el('node-sni').readOnly=editingNode.protocol==='argo';el('node-address').required=editingNode.protocol!=='argo';el('node-address-label').textContent=editingNode.protocol==='argo'?'优选域名 / IP（留空使用 www.cloudflare.com）':'公网连接地址 / DDNS';

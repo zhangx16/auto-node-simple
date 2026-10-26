@@ -3,7 +3,7 @@ import hashlib,json,secrets,time,threading
 LOCK=threading.RLock()
 from urllib.parse import urlsplit,urlunsplit,quote,unquote
 from fastapi import HTTPException
-from . import formats,cloudflare
+from . import formats,cloudflare,auto_repair
 
 def init(c):
  if 'config' not in {r[1] for r in c.execute('PRAGMA table_info(nodes)')}:c.execute("ALTER TABLE nodes ADD COLUMN config TEXT NOT NULL DEFAULT '{}'")
@@ -31,7 +31,7 @@ def pending(c,ident):
 
 def describe(c,n):
  cfg=config(n)
- return {k:n[k] for k in ['id','name','protocol','uri','created']}|{'edit_name':cfg['name'],'port':cfg['port'],'address':cfg['address'],'client_port':cfg['client_port'],'sni':cfg['sni'],'pending_update':pending(c,n['id'])}
+ return {k:n[k] for k in ['id','name','protocol','uri','created']}|{'edit_name':cfg['name'],'port':cfg['port'],'address':cfg['address'],'client_port':cfg['client_port'],'sni':cfg['sni'],'pending_update':pending(c,n['id']),'repair':auto_repair.status(c,n['id'])}
 
 def display_name(cfg):
  suffix='-'+{'argo':'CF','reality':'Vless','hysteria2':'hy2'}[cfg['protocol']]

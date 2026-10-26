@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse,PlainTextResponse,Response
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import URLSafeTimedSerializer,BadSignature
 from pydantic import BaseModel,Field,field_validator
-from . import cloudflare,node_management
+from . import cloudflare,node_management,auto_repair
 ROOT=Path(__file__).parent;DATA=Path(os.getenv('DATA_DIR','/app/data'));DATA.mkdir(parents=True,exist_ok=True)
 ASSETS=Path(os.getenv('ASSET_DIR','/app/assets'))
 PANEL=os.getenv('PANEL_URL','http://localhost:18901').rstrip('/')
@@ -29,6 +29,7 @@ with conn() as c:
  CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,name TEXT NOT NULL,token TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1);
  CREATE TABLE IF NOT EXISTS subscription_nodes(subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,position INTEGER NOT NULL,PRIMARY KEY(subscription_id,node_id));""")
  node_management.init(c)
+ auto_repair.init(c)
  if 'target_node' not in {r[1] for r in c.execute('PRAGMA table_info(installs)')}:c.execute("ALTER TABLE installs ADD COLUMN target_node TEXT NOT NULL DEFAULT ''")
  cloudflare.init(c)
  from . import formats
@@ -39,6 +40,8 @@ with conn() as c:
  node_management.migrate_argo_suffix(c)
 os.chmod(DATA/'simple.db',0o600)
 app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
+app.add_event_handler('startup',auto_repair.start)
+app.add_event_handler('shutdown',auto_repair.stop)
 def owner(r):
  try:signer.loads(r.cookies.get('simple_session',''),max_age=86400)
  except BadSignature:raise HTTPException(401,'请先登录')
@@ -208,6 +211,25 @@ def cancel_node_update(ident:str,r:Request):
 def delete_node(ident:str,r:Request):
  owner(r)
  with node_management.LOCK:return node_management.delete(ident)
+
+
+@app.post('/api/nodes/{ident}/repair/setup')
+def repair_setup(ident:str,r:Request):
+ owner(r);return auto_repair.setup(ident)
+
+@app.post('/api/nodes/{ident}/repair/{action}')
+def repair_control(ident:str,action:Literal['disable','resume'],r:Request):
+ owner(r);return auto_repair.control(ident,action)
+
+@app.get('/repair/{ident}/{token}.sh')
+def repair_script(ident:str,token:str):
+ return PlainTextResponse(auto_repair.script(ident,token),headers={'Cache-Control':'no-store'})
+
+@app.post('/repair/{ident}/report')
+def repair_report(ident:str,b:auto_repair.Report,r:Request):
+ auth=r.headers.get('authorization','')
+ if not auth.startswith('Bearer '):raise HTTPException(401,'缺少巡检凭据')
+ return auto_repair.report(ident,auth[7:],b)
 
 class Subscription(BaseModel):
  name:str=Field(min_length=1,max_length=60)

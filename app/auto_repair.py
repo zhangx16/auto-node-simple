@@ -1,0 +1,116 @@
+"""Bounded health checks and node-initiated, rate-limited repair permits."""
+import hashlib,hmac,json,secrets,threading,time
+from fastapi import HTTPException
+from pydantic import BaseModel,Field
+LOCK=threading.RLock()
+STOP=threading.Event()
+WORKER=None
+
+def init(c):
+ c.execute('''CREATE TABLE IF NOT EXISTS node_repair(
+ node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+ token_hash TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,paused INTEGER NOT NULL DEFAULT 0,
+ last_report REAL NOT NULL DEFAULT 0,local_failures INTEGER NOT NULL DEFAULT 0,
+ public_failures INTEGER NOT NULL DEFAULT 0,probe_failures INTEGER NOT NULL DEFAULT 0,
+ probe_at REAL NOT NULL DEFAULT 0,probe_status TEXT NOT NULL DEFAULT 'unknown',
+ latency_ms INTEGER,probe_error TEXT NOT NULL DEFAULT '',last_repair REAL NOT NULL DEFAULT 0,
+ repair_count INTEGER NOT NULL DEFAULT 0,history TEXT NOT NULL DEFAULT '[]',
+ last_action TEXT NOT NULL DEFAULT '',last_result TEXT NOT NULL DEFAULT '')''')
+
+def status(c,ident):
+ r=c.execute('SELECT * FROM node_repair WHERE node_id=?',(ident,)).fetchone()
+ if not r:return {'configured':False}
+ n=dict(r)
+ return {'configured':True,**{k:n[k] for k in ('enabled','paused','last_report','probe_at','probe_status','latency_ms','probe_error','last_repair','repair_count','last_action','last_result','local_failures','public_failures')}}
+
+def setup(ident):
+ from . import main,node_management
+ with LOCK,node_management.LOCK,main.conn() as c:
+  node_management.get(c,ident)
+  if node_management.pending(c,ident):raise HTTPException(409,'请先完成或取消节点更新')
+  token=secrets.token_urlsafe(32)
+  c.execute('INSERT INTO node_repair(node_id,token_hash) VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET token_hash=excluded.token_hash,enabled=1,last_report=0,probe_status=\'unknown\',probe_at=0,probe_failures=0', (ident,hashlib.sha256(token.encode()).hexdigest()))
+ return {'command':main.download_command(f'{main.PANEL}/repair/{ident}/{token}.sh')}
+
+def authorize(c,ident,token):
+ row=c.execute('SELECT * FROM node_repair WHERE node_id=?',(ident,)).fetchone()
+ if not row or not hmac.compare_digest(row['token_hash'],hashlib.sha256(token.encode()).hexdigest()):raise HTTPException(404,'自动修复凭据已失效')
+ return dict(row)
+
+def script(ident,token):
+ import shlex
+ from . import main
+ with main.conn() as c:authorize(c,ident,token)
+ values={'PANEL':main.PANEL,'NODE_ID':ident,'REPORT_TOKEN':token}
+ return '#!/bin/sh\nset -eu\numask 077\n'+'\n'.join(k+'='+shlex.quote(v) for k,v in values.items())+'\n'+(main.ROOT/'repair-install.sh').read_text().replace('__WATCHDOG_B64__',__import__('base64').b64encode((main.ROOT/'node-watchdog.sh').read_bytes()).decode())
+
+class Report(BaseModel):
+ local_ok:bool
+ public_ok:bool=True
+ network_ok:bool=True
+ result:str=Field(default='',max_length=80)
+
+def report(ident,token,b):
+ from . import main,node_management
+ now=time.time()
+ with LOCK,node_management.LOCK,main.conn() as c:
+  n=authorize(c,ident,token)
+  if now-n['last_report']<30:return {'action':'none'}
+  local=0 if b.local_ok else n['local_failures']+1
+  public=0 if b.public_ok else n['public_failures']+1
+  c.execute('UPDATE node_repair SET last_report=?,local_failures=?,public_failures=?,last_result=? WHERE node_id=?',(now,local,public,b.result,ident))
+  # Configuration changes and disabled/paused nodes never receive restart permits.
+  if not n['enabled'] or n['paused'] or node_management.pending(c,ident) or not b.network_ok:return {'action':'none'}
+  protocol_failed=n['probe_status']=='failed' and n['probe_failures']>=2 and n['probe_at']>n['last_repair'] and now-n['probe_at']<660
+  action='core' if local>=3 else 'tunnel' if public>=3 and node_management.get(c,ident)['protocol']=='argo' else 'protocol' if protocol_failed else 'none'
+  if action=='none' or now-n['last_repair']<300:return {'action':'none'}
+  history=[t for t in json.loads(n['history']) if now-t<3600]
+  if len(history)>=3:
+   c.execute('UPDATE node_repair SET paused=1 WHERE node_id=?',(ident,));return {'action':'none'}
+  history.append(now)
+  # Consume the permit before replying, even if the reply or restart is lost.
+  c.execute('UPDATE node_repair SET last_repair=?,repair_count=repair_count+1,history=?,paused=?,last_action=?,local_failures=0,public_failures=0,probe_failures=0 WHERE node_id=?',(now,json.dumps(history),int(len(history)>=3),action,ident))
+  return {'action':action}
+
+def control(ident,action):
+ from . import main,node_management
+ with LOCK,node_management.LOCK,main.conn() as c:
+  node_management.get(c,ident)
+  if not c.execute('SELECT 1 FROM node_repair WHERE node_id=?',(ident,)).fetchone():raise HTTPException(409,'尚未安装自动修复')
+  if action=='disable':c.execute('UPDATE node_repair SET enabled=0 WHERE node_id=?',(ident,))
+  else:c.execute("UPDATE node_repair SET enabled=1,paused=0,history='[]',repair_count=0 WHERE node_id=?",(ident,))
+ return {'ok':True}
+
+def check(ident):
+ from . import main
+ from .node_probe import probe
+ with main.conn() as c:
+  n=c.execute('SELECT n.uri FROM nodes n JOIN node_repair r ON r.node_id=n.id WHERE n.id=? AND r.enabled=1 AND r.last_report>0',(ident,)).fetchone()
+ if not n:return
+ uri=n['uri']
+ try:latency=probe(uri);state='ok';error=''
+ except (OSError,ValueError,TimeoutError):latency=None;state='failed';error='两处 HTTPS 实际转发均未通过，请检查地址、映射及 TCP/UDP 放行'
+ except Exception:latency=None;state='unavailable';error='面板探测组件不可用，未作为修复依据'
+ with LOCK,main.conn() as c:
+  # A result for an old link must not trigger repair of an edited node.
+  current=c.execute('SELECT uri FROM nodes WHERE id=?',(ident,)).fetchone()
+  if not current or current['uri']!=uri:return
+  c.execute('UPDATE node_repair SET probe_at=?,probe_status=?,probe_error=?,latency_ms=?,probe_failures=CASE WHEN ?=\'failed\' THEN probe_failures+1 ELSE 0 END WHERE node_id=?',(time.time(),state,error,latency,state,ident))
+
+def worker():
+ from . import main
+ while not STOP.wait(5):
+  try:
+   with main.conn() as c:ids=[r[0] for r in c.execute('SELECT node_id FROM node_repair WHERE enabled=1 AND last_report>? AND probe_at<? ORDER BY probe_at LIMIT 2',(time.time()-180,time.time()-300))]
+   for ident in ids:
+    if STOP.is_set():break
+    check(ident)
+  except Exception:
+   # Do not log node links or credentials on transient failures.
+   import logging;logging.getLogger(__name__).warning('Auto repair health cycle failed')
+
+def start():
+ global WORKER
+ STOP.clear();WORKER=threading.Thread(target=worker,name='node-health',daemon=True);WORKER.start()
+
+def stop():STOP.set()

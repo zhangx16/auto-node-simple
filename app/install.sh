@@ -161,4 +161,4 @@ jq -n --arg link "$LINK" '{link:$link}' > "$TMP/result"
 OK=1
 curl -fsS --retry 2 --retry-all-errors --connect-timeout 5 --max-time 30 -H 'Content-Type: application/json' --data-binary @"$TMP/result" "$PANEL/result/$INSTALL_ID/$CALLBACK_TOKEN" >/dev/null || echo '结果回传失败，请从终端复制链接。'
 printf '\n安装完成（未执行公网测活），节点链接：\n%s\n' "$LINK"
-echo '仅保留协议服务；不安装心跳、探针或管理 cron。'
+echo '协议服务已安装；如需巡检与自动修复，请在面板节点管理中单独开启并执行巡检安装命令。'
