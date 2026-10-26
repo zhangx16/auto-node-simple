@@ -1,4 +1,4 @@
-import unittest,tempfile,subprocess,os,socket,time,json,urllib.request,urllib.error,hashlib,re
+import unittest,tempfile,subprocess,os,socket,time,json,urllib.request,urllib.error,hashlib,re,base64,shlex
 from pathlib import Path
 from itsdangerous import URLSafeTimedSerializer
 class AppTests(unittest.TestCase):
@@ -33,13 +33,15 @@ class AppTests(unittest.TestCase):
   code,body,headers=self.call('/api/login',{'username':'admin','password':'test-password'},authed=False)
   self.assertEqual(code,200);self.assertIn('Secure',headers['Set-Cookie']);self.assertIn('HttpOnly',headers['Set-Cookie'])
   self.assertEqual(self.call('/api/login',{'username':'admin','password':'wrong'},authed=False)[0],401)
- def test_three_scripts_callbacks_replay_and_no_management(self):
+ def test_three_scripts_callbacks_replay_and_integrated_watchdog(self):
   for protocol in ['argo','reality','hysteria2']:
    code,body,_=self.call('/api/installs',{'protocol':protocol,'address':'1.1.1.1','port':18443,'tunnel':'fixed','tunnel_token':'fixture-token','tunnel_hostname':'fixed.example.com'});self.assertEqual(code,200,body);job=json.loads(body)
    subprocess.run(['sh','-n'],input=job['command'].encode(),check=True)
    url=re.search(r'http://[^ ]+\.sh',job['command'])[0];path=url.removeprefix(self.base)
    code,script,_=self.call(path,authed=False);self.assertEqual(code,200);subprocess.run(['sh','-n'],input=script,check=True)
-   self.assertNotIn(b'crontab ',script);self.assertNotIn(b'/agent/',script)
+   setup=shlex.split(next(line for line in script.decode().splitlines() if line.startswith('REPAIR_INSTALLER=')).split('=',1)[1])[0]
+   setup=base64.b64decode(setup);subprocess.run(['sh','-n'],input=setup,check=True)
+   self.assertIn(b'watchdog.sh --all',setup);self.assertIn(b'REPAIR_KEEP_TOKEN',script);self.assertNotIn(b'/agent/',script)
    result=path.replace('/install/','/result/').removesuffix('.sh')
    link='vless://341cad6d-9bf5-4b09-9c96-a7879ebc8fe1@1.1.1.1:443?security=tls&type=ws&sni=edge.example.com&host=edge.example.com&path=%2Fws#result'
    self.assertEqual(self.call(result,{'link':link},authed=False)[0],200)

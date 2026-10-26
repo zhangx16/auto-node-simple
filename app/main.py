@@ -130,11 +130,14 @@ def script(ident:str,token:str):
  if json.loads(row['config']).get('protocol')=='argo' and json.loads(row['config']).get('tunnel')!='fixed':raise HTTPException(410,'临时隧道已移除，请重新生成固定隧道安装命令')
  cfg=json.loads(row['config']);manifest=json.loads((ASSETS/'manifest.json').read_text())
  if cfg.get('protocol')=='argo' and not cfg.get('address','').strip():cfg['address']=DEFAULT_ARGO_ADDRESS
- values={'PANEL':PANEL,'INSTALL_ID':ident,'NODE_ID':str(cfg.get('id',ident)),'CALLBACK_TOKEN':token,'PAYLOAD':base64.b64encode(json.dumps(cfg).encode()).decode(),'MANIFEST':base64.b64encode(json.dumps(manifest).encode()).decode()}
+ with conn() as c:keep_repair=bool(c.execute('SELECT 1 FROM node_repair WHERE node_id=?',(str(cfg.get('id',ident)),)).fetchone())
+ values={'PANEL':PANEL,'INSTALL_ID':ident,'NODE_ID':str(cfg.get('id',ident)),'CALLBACK_TOKEN':token,'PAYLOAD':base64.b64encode(json.dumps(cfg).encode()).decode(),'MANIFEST':base64.b64encode(json.dumps(manifest).encode()).decode(),'REPORT_TOKEN':auto_repair.install_token(str(cfg.get('id',ident)),token),'REPAIR_KEEP_TOKEN':'1' if keep_repair else '0','REPAIR_INSTALLER':base64.b64encode(auto_repair.installer().encode()).decode()}
  text='#!/bin/sh\nset -eu\numask 077\n'+'\n'.join(k+'='+shlex.quote(v) for k,v in values.items())+'\n'+(ROOT/'install.sh').read_text()
  return PlainTextResponse(text,headers={'Cache-Control':'no-store'})
 class Result(BaseModel):
  link:str=Field(default='',max_length=16000);error:str=Field(default='',max_length=300)
+ repair_installed:bool=False
+ repair_token_kept:bool=False
 @app.post('/result/{ident}/{token}')
 def result(ident:str,token:str,b:Result):
  with node_management.LOCK:return accept_result(ident,token,b)
@@ -169,6 +172,7 @@ def accept_result(ident,token,b):
    if target:
     c.execute('UPDATE nodes SET name=?,uri=?,config=? WHERE id=?',(name,b.link,json.dumps(stored),target));c.execute('DELETE FROM node_updates WHERE node_id=?',(target,))
    else:c.execute('INSERT OR IGNORE INTO nodes(id,name,protocol,uri,created,config) VALUES (?,?,?,?,?,?)',(ident,name,parsed['kind'],b.link,time.time(),json.dumps(stored)))
+   if b.repair_installed:auto_repair.enroll(c,target or ident,token,b.repair_token_kept)
   c.execute('UPDATE installs SET status=?,result=?,error=?,config=? WHERE id=?',('done' if b.link else 'failed',b.link,b.error,'{}' if b.link else row['config'],ident))
  return {'ok':True}
 @app.get('/api/installs')

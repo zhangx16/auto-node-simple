@@ -1,4 +1,4 @@
-import hashlib,json,os,re,sqlite3,subprocess,tempfile,time,unittest
+import hashlib,json,os,re,shlex,sqlite3,subprocess,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 from fastapi import HTTPException
@@ -85,7 +85,7 @@ class RepairAPITests(unittest.TestCase):
   url=re.search(r'http://[^ ]+\.sh',json.loads(body)['command'])[0];script_path=url.removeprefix(self.base)
   code,script,_=self.call(script_path,authed=False);self.assertEqual(code,200)
   subprocess.run(['sh','-n'],input=script,check=True)
-  self.assertIn(b'OnUnitInactiveSec=60',script);self.assertNotIn(b'fixture-token',script)
+  self.assertIn(b'OnCalendar=*-*-* *:*:00',script);self.assertNotIn(b'fixture-token',script)
   token=script_path.rsplit('/',1)[1].removesuffix('.sh')
   import urllib.request
   req=urllib.request.Request(self.base+'/repair/'+ident+'/report',method='POST',data=b'{"local_ok":true}',headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
@@ -101,6 +101,38 @@ class RepairAPITests(unittest.TestCase):
   self.assertEqual(self.call(path,{})[0],200)
   self.assertEqual(self.call(url,authed=False)[0],404)
   self.assertEqual(self.call('/api/nodes/missing/repair/setup',{})[0],404)
+
+ def assignment(self,script,name):
+  return shlex.split(next(line for line in script.decode().splitlines() if line.startswith(name+'=')).split('=',1)[1])[0]
+ def test_new_install_embeds_watchdog_and_enrolls_only_after_success(self):
+  ident,cfg,result,script=self.prepare('reality')
+  report_token=self.assignment(script,'REPORT_TOKEN')
+  self.assertEqual(self.assignment(script,'REPAIR_KEEP_TOKEN'),'0')
+  self.assertIn(b'REPAIR_INSTALLER=',script)
+  with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT count(*) FROM node_repair WHERE node_id=?',(ident,)).fetchone()[0],0)
+  self.assertEqual(self.call(result,{'link':self.uri(cfg),'repair_installed':True},authed=False)[0],200)
+  with sqlite3.connect(self.data/'simple.db') as c:
+   row=c.execute('SELECT token_hash,enabled,last_report FROM node_repair WHERE node_id=?',(ident,)).fetchone()
+   self.assertEqual(row,(hashlib.sha256(report_token.encode()).hexdigest(),1,0))
+   c.execute('UPDATE node_repair SET repair_count=2,last_report=123 WHERE node_id=?',(ident,))
+  # Callback replay must not reset credentials or repair accounting.
+  self.assertEqual(self.call(result,{'link':self.uri(cfg),'repair_installed':True},authed=False)[0],200)
+  with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT repair_count,last_report FROM node_repair WHERE node_id=?',(ident,)).fetchone(),(2,123))
+ def test_update_keeps_existing_watchdog_credential_and_pause_state(self):
+  ident,cfg=self.installed('reality')
+  setup=json.loads(self.call('/api/nodes/'+ident+'/repair/setup',{})[1]);url=re.search(r'http://[^ ]+\.sh',setup['command'])[0].removeprefix(self.base)
+  token=url.rsplit('/',1)[1].removesuffix('.sh')
+  with sqlite3.connect(self.data/'simple.db') as c:c.execute('UPDATE node_repair SET enabled=0,paused=1,repair_count=2 WHERE node_id=?',(ident,))
+  edit={k:cfg[k] for k in ['name','port','client_port','address','sni']};edit['port']+=1
+  code,body,_=self.call('/api/nodes/'+ident,edit,method='PUT');self.assertEqual(code,200,body)
+  _,new,result,script=self.command(json.loads(body));self.assertEqual(self.assignment(script,'REPAIR_KEEP_TOKEN'),'1')
+  self.assertEqual(self.call(result,{'link':self.uri(new),'repair_installed':True,'repair_token_kept':True},authed=False)[0],200)
+  with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT token_hash,enabled,paused,repair_count FROM node_repair WHERE node_id=?',(ident,)).fetchone(),(hashlib.sha256(token.encode()).hexdigest(),0,1,2))
+ def test_failed_install_never_registers_watchdog(self):
+  ident,cfg,result,_=self.prepare('hysteria2')
+  self.assertEqual(self.call(result,{'error':'fixture failure'},authed=False)[0],200)
+  with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT count(*) FROM node_repair WHERE node_id=?',(ident,)).fetchone()[0],0)
+
 
 class ProtocolProbeTests(unittest.TestCase):
  def test_fallback_trace_validation_and_process_cleanup(self):

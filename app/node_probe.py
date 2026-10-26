@@ -3,6 +3,12 @@ import hashlib,json,os,platform,shutil,socket,subprocess,tempfile,threading,time
 from . import formats
 SLOT=threading.Lock()
 
+def binary_digest(binary):
+ digest=hashlib.sha256()
+ with binary.open('rb') as stream:
+  for chunk in iter(lambda:stream.read(65536),b''):digest.update(chunk)
+ return digest.hexdigest()
+
 def probe(uri):
  from . import main
  arch={'x86_64':'amd64','aarch64':'arm64','amd64':'amd64','arm64':'arm64'}.get(platform.machine())
@@ -11,7 +17,7 @@ def probe(uri):
  except (OSError,ValueError,TypeError) as exc:raise RuntimeError('Probe manifest unavailable') from exc
  if not binary.is_file() or not os.access(binary,os.X_OK) or not shutil.which('curl'):raise RuntimeError('Missing probe component')
  expected=manifest.get(binary.name,{}).get('sha256')
- try:actual=hashlib.sha256(binary.read_bytes()).hexdigest()
+ try:actual=binary_digest(binary)
  except OSError as exc:raise RuntimeError('Probe binary unreadable') from exc
  if actual!=expected:raise RuntimeError('Probe binary checksum mismatch')
  with SLOT,tempfile.TemporaryDirectory(prefix='simple-probe-') as temp:

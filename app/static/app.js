@@ -27,11 +27,11 @@ el('subs').onclick=async e=>{const b=e.target.closest('[data-sub-action]');if(!b
 
 const nodeOpened=new Set();
 function repairInfo(n){
- const r=n.repair||{};if(!r.configured)return '<p class="hint">自动修复未开启，需在目标服务器执行一次安装命令。</p>';
+ const r=n.repair||{};if(!r.configured)return '<p class="hint">尚未收到巡检配置；新安装会自动部署，旧节点可在下方补装。</p>';
  const state=!r.enabled?'已停用':r.paused?'达到上限，已暂停':!r.last_report?'等待安装 / 首次巡检':Date.now()/1000-r.last_report>180?'巡检超时':'巡检运行中';
  const probe={ok:'转发正常',failed:'转发失败',unavailable:'探测组件不可用',unknown:'等待测活'}[r.probe_status]||'等待测活';
  const result={core_restarted:'核心已重启',tunnel_restarted:'隧道已重启',core_and_tunnel_restarted:'核心及隧道已重启',restart_failed:'重启失败',shared_core_cooldown:'共享核心冷却中'}[r.last_result]||'';
- return `<p class="hint">自动修复：${state} · ${probe}${r.latency_ms!=null?' · '+r.latency_ms+' ms':''} · 已授权 ${r.repair_count} 次 · 本地连续失败 ${r.local_failures} 次${n.protocol==='argo'?' · 公网 WS 连续失败 '+r.public_failures+' 次':''}${result?' · '+result:''}<br>最后巡检：${r.last_report?new Date(r.last_report*1000).toLocaleString('zh-CN'):'尚未收到'}${r.last_repair?' · 最近修复：'+new Date(r.last_repair*1000).toLocaleString('zh-CN'):''}</p>${r.probe_error?`<p class="node-warning">${esc(r.probe_error)}</p>`:''}`;
+ return `<p class="hint">自动修复：${state} · 巡检 v${r.script_version||1} · ${probe}${r.latency_ms!=null?' · '+r.latency_ms+' ms':''} · 已授权 ${r.repair_count} 次 · 本地连续失败 ${r.local_failures} 次${n.protocol==='argo'?' · 公网 WS 连续失败 '+r.public_failures+' 次':''}${result?' · '+result:''}<br>最后巡检：${r.last_report?new Date(r.last_report*1000).toLocaleString('zh-CN'):'尚未收到'}${r.last_repair?' · 最近修复：'+new Date(r.last_repair*1000).toLocaleString('zh-CN'):''}</p>${r.probe_error?`<p class="node-warning">${esc(r.probe_error)}</p>`:''}`;
 }
 function repairButtons(n){
  const r=n.repair||{};
@@ -50,7 +50,7 @@ el('managed-nodes').onclick=async e=>{
  try{if(b.dataset.nodeAction==='copy'){await copy(n.uri,b);return;}
  if(b.dataset.nodeAction==='repair-setup'){
  if(n.repair?.configured&&!confirm('重新生成会立即撤销旧巡检凭据，需重新在目标服务器安装。继续？'))return;
- const r=await api('/api/nodes/'+n.id+'/repair/setup',{});el('command').value=r.command;el('command-hostname').textContent='请在此节点服务器以 root 执行，安装每分钟巡检。连续 3 次失败后重启原服务，5 分钟冷却，1 小时最多 3 次后暂停。仅支持本项目安装的协议服务；旧项目迁入节点需先迁移服务。';el('command-section').hidden=false;el('command-section').scrollIntoView({block:'nearest'});await load();return;}
+ const r=await api('/api/nodes/'+n.id+'/repair/setup',{});el('command').value=r.command;el('command-hostname').textContent='请在此节点服务器以 root 执行，安装每分钟巡检（同机共用一个定时任务）。连续 3 次失败后重启原服务，5 分钟冷却，1 小时最多 3 次后暂停。仅支持本项目安装的协议服务；旧项目迁入节点需先迁移服务。';el('command-section').hidden=false;el('command-section').scrollIntoView({block:'nearest'});await load();return;}
  if(['repair-disable','repair-resume'].includes(b.dataset.nodeAction)){await api('/api/nodes/'+n.id+'/repair/'+b.dataset.nodeAction.slice(7),{});await load();return;}
  if(b.dataset.nodeAction==='delete'){if(confirm('删除节点“'+n.name+'”？将从面板及所有订阅中移除，并使相关安装和更新命令失效。巡检凭据也会失效。服务器上的服务、巡检任务、Cloudflare 隧道和 DNS 会保留，需另行清理。')){await api('/api/nodes/'+n.id,undefined,'DELETE');nodeOpened.delete(n.id);await load();}return;}
  if(b.dataset.nodeAction==='cancel'){if(confirm('仅在更新命令尚未执行时取消。若已在服务器执行，请先核对实际端口；取消不会回滚远端。继续？')){await api('/api/nodes/'+n.id+'/cancel-update',{});await load();}return;}

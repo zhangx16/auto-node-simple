@@ -1,5 +1,5 @@
 """Bounded health checks and node-initiated, rate-limited repair permits."""
-import hashlib,hmac,json,secrets,threading,time
+import base64,hashlib,hmac,json,secrets,threading,time
 from fastapi import HTTPException
 from pydantic import BaseModel,Field
 LOCK=threading.RLock()
@@ -16,12 +16,13 @@ def init(c):
  latency_ms INTEGER,probe_error TEXT NOT NULL DEFAULT '',last_repair REAL NOT NULL DEFAULT 0,
  repair_count INTEGER NOT NULL DEFAULT 0,history TEXT NOT NULL DEFAULT '[]',
  last_action TEXT NOT NULL DEFAULT '',last_result TEXT NOT NULL DEFAULT '')''')
+ if 'script_version' not in {r[1] for r in c.execute('PRAGMA table_info(node_repair)')}:c.execute('ALTER TABLE node_repair ADD COLUMN script_version INTEGER NOT NULL DEFAULT 1')
 
 def status(c,ident):
  r=c.execute('SELECT * FROM node_repair WHERE node_id=?',(ident,)).fetchone()
  if not r:return {'configured':False}
  n=dict(r)
- return {'configured':True,**{k:n[k] for k in ('enabled','paused','last_report','probe_at','probe_status','latency_ms','probe_error','last_repair','repair_count','last_action','last_result','local_failures','public_failures')}}
+ return {'configured':True,**{k:n[k] for k in ('enabled','paused','last_report','probe_at','probe_status','latency_ms','probe_error','last_repair','repair_count','last_action','last_result','local_failures','public_failures','script_version')}}
 
 def setup(ident):
  from . import main,node_management
@@ -37,18 +38,35 @@ def authorize(c,ident,token):
  if not row or not hmac.compare_digest(row['token_hash'],hashlib.sha256(token.encode()).hexdigest()):raise HTTPException(404,'自动修复凭据已失效')
  return dict(row)
 
+def installer():
+ from . import main
+ return (main.ROOT/'repair-install.sh').read_text().replace('__WATCHDOG_B64__',base64.b64encode((main.ROOT/'node-watchdog.sh').read_bytes()).decode())
+
+def install_token(ident,callback_token):
+ from . import main
+ return hmac.new(main.KEY.read_bytes(),('repair-install:'+ident+':'+callback_token).encode(),hashlib.sha256).hexdigest()
+
+def enroll(c,ident,callback_token,kept=False):
+ if kept:
+  if not c.execute('SELECT 1 FROM node_repair WHERE node_id=?',(ident,)).fetchone():raise HTTPException(409,'原巡检凭据已撤销，请重新下载安装命令')
+  return
+ token=install_token(ident,callback_token)
+ # Updates preserve the user's disabled/paused state and repair history.
+ c.execute("INSERT INTO node_repair(node_id,token_hash) VALUES (?,?) ON CONFLICT(node_id) DO UPDATE SET token_hash=excluded.token_hash,last_report=0",(ident,hashlib.sha256(token.encode()).hexdigest()))
+
 def script(ident,token):
  import shlex
  from . import main
  with main.conn() as c:authorize(c,ident,token)
  values={'PANEL':main.PANEL,'NODE_ID':ident,'REPORT_TOKEN':token}
- return '#!/bin/sh\nset -eu\numask 077\n'+'\n'.join(k+'='+shlex.quote(v) for k,v in values.items())+'\n'+(main.ROOT/'repair-install.sh').read_text().replace('__WATCHDOG_B64__',__import__('base64').b64encode((main.ROOT/'node-watchdog.sh').read_bytes()).decode())
+ return '#!/bin/sh\nset -eu\numask 077\n'+'\n'.join(k+'='+shlex.quote(v) for k,v in values.items())+'\n'+installer()
 
 class Report(BaseModel):
  local_ok:bool
  public_ok:bool=True
  network_ok:bool=True
  result:str=Field(default='',max_length=80)
+ script_version:int=Field(default=1,ge=1,le=1000)
 
 def report(ident,token,b):
  from . import main,node_management
@@ -58,7 +76,7 @@ def report(ident,token,b):
   if now-n['last_report']<30:return {'action':'none'}
   local=0 if b.local_ok else n['local_failures']+1
   public=0 if b.public_ok else n['public_failures']+1
-  c.execute('UPDATE node_repair SET last_report=?,local_failures=?,public_failures=?,last_result=? WHERE node_id=?',(now,local,public,b.result,ident))
+  c.execute('UPDATE node_repair SET last_report=?,local_failures=?,public_failures=?,last_result=?,script_version=? WHERE node_id=?',(now,local,public,b.result,b.script_version,ident))
   # Configuration changes and disabled/paused nodes never receive restart permits.
   if not n['enabled'] or n['paused'] or node_management.pending(c,ident) or not b.network_ok:return {'action':'none'}
   protocol_failed=n['probe_status']=='failed' and n['probe_failures']>=2 and n['probe_at']>n['last_repair'] and now-n['probe_at']<660

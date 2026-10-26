@@ -29,11 +29,17 @@ esac
    self.assertEqual(result.returncode,0)
    rows=json.loads(self.call('/api/installs')[1]);row=next(r for r in rows if r['id']==job['id']);self.assertEqual(row['status'],'done')
    if protocol!='argo':
-    probe='import sys;sys.path.insert(0,"/app");from app.node_probe import probe_link;print(probe_link(sys.stdin.read(),timeout=15)["ok"])'
+    probe='import sys;sys.path.insert(0,"/app");from app.node_probe import probe;print(probe(sys.stdin.read())>=0)'
     # Existing test image provides the native protocol probe core; do not print credentials.
     r=subprocess.run(['python','-c',probe],input=row['result'].encode(),capture_output=True,timeout=45,cwd='/tmp',env=os.environ|{'PYTHONPATH':'/app'})
     self.assertEqual(r.returncode,0,r.stderr.decode()[-1000:]);self.assertIn(b'True',r.stdout)
    original=row['result'];nid=job['id']
+   code,body,_=self.call('/api/nodes/'+nid);self.assertEqual(code,200,body)
+   repair=json.loads(body)['repair'];self.assertTrue(repair['configured']);self.assertGreater(repair['last_report'],0);self.assertEqual(repair['script_version'],2)
+   self.assertTrue(Path('/etc/systemd/system/auto-node-repair.timer').exists())
+   self.assertFalse(Path('/etc/systemd/system/auto-node-repair-'+nid+'.timer').exists())
+   import sqlite3
+   with sqlite3.connect(self.data/'simple.db') as c:old_hash=c.execute('SELECT token_hash FROM node_repair WHERE node_id=?',(nid,)).fetchone()[0]
    code,raw,_=self.call('/api/nodes/'+nid,{'name':'Updated integration','port':port+10,'client_port':port+10,'address':'127.0.0.1','sni':'www.amd.com'},method='PUT');self.assertEqual(code,200,raw)
    update=json.loads(raw);self.assertTrue(update['pending']);url=re.search(r'http://[^ ]+\.sh',update['command'])[0]
    _,updated_script,_=self.call(url.removeprefix(self.base),authed=False)
@@ -41,10 +47,11 @@ esac
    self.assertEqual(result.returncode,0,(result.stdout+result.stderr).decode()[-1500:])
    code,body,_=self.call('/api/nodes/'+nid);self.assertEqual(code,200,body);edited=json.loads(body)
    self.assertEqual(edited['port'],port+10);self.assertIsNone(edited['pending_update'])
+   with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT token_hash FROM node_repair WHERE node_id=?',(nid,)).fetchone()[0],old_hash)
    from urllib.parse import urlsplit,parse_qs
    self.assertEqual(urlsplit(original).username,urlsplit(edited['uri']).username)
    if protocol=='reality':self.assertEqual(parse_qs(urlsplit(original).query)['pbk'],parse_qs(urlsplit(edited['uri']).query)['pbk'])
    r=subprocess.run(['python','-c',probe],input=edited['uri'].encode(),capture_output=True,timeout=45,cwd='/tmp',env=os.environ|{'PYTHONPATH':'/app'})
    self.assertEqual(r.returncode,0,r.stderr.decode()[-1000:]);self.assertIn(b'True',r.stdout)
-   print(protocol+': install and port update both forwarded HTTPS; stable identity, no duplicate node')
+   print(protocol+': install and port update both forwarded HTTPS; automatic v2 watchdog enrollment, preserved credential, shared timer, stable identity')
 if __name__=='__main__':unittest.main()
