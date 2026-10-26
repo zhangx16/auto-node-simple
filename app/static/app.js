@@ -31,11 +31,16 @@ function repairInfo(n){
  const state=!r.enabled?'已停用':r.paused?'达到上限，已暂停':!r.last_report?'等待安装 / 首次巡检':Date.now()/1000-r.last_report>180?'巡检超时':'巡检运行中';
  const probe={ok:'转发正常',failed:'转发失败',unavailable:'探测组件不可用',unknown:'等待测活'}[r.probe_status]||'等待测活';
  const result={core_restarted:'核心已重启',tunnel_restarted:'隧道已重启',core_and_tunnel_restarted:'核心及隧道已重启',restart_failed:'重启失败',shared_core_cooldown:'共享核心冷却中'}[r.last_result]||'';
- return `<p class="hint">自动修复：${state} · 巡检 v${r.script_version||1} · ${probe}${r.latency_ms!=null?' · '+r.latency_ms+' ms':''} · 已授权 ${r.repair_count} 次 · 本地连续失败 ${r.local_failures} 次${n.protocol==='argo'?' · 公网 WS 连续失败 '+r.public_failures+' 次':''}${result?' · '+result:''}<br>最后巡检：${r.last_report?new Date(r.last_report*1000).toLocaleString('zh-CN'):'尚未收到'}${r.last_repair?' · 最近修复：'+new Date(r.last_repair*1000).toLocaleString('zh-CN'):''}</p>${r.probe_error?`<p class="node-warning">${esc(r.probe_error)}</p>`:''}`;
+ return `<p class="hint">自动修复：${state} · 安装脚本 v${r.script_version||1} · ${probe}${r.latency_ms!=null?' · '+r.latency_ms+' ms':''} · 已授权 ${r.repair_count} 次 · 本地连续失败 ${r.local_failures} 次${n.protocol==='argo'?' · 公网 WS 连续失败 '+r.public_failures+' 次':''}${result?' · '+result:''}<br>最后巡检：${r.last_report?new Date(r.last_report*1000).toLocaleString('zh-CN'):'尚未收到'}${r.last_repair?' · 最近修复：'+new Date(r.last_repair*1000).toLocaleString('zh-CN'):''}</p>${r.probe_error?`<p class="node-warning">${esc(r.probe_error)}</p>`:''}${upgradeInfo(r)}`;
+}
+function upgradeInfo(r){
+ if((r.script_version||1)<3)return '<p class="hint">自动升级：需手动执行一次升级安装脚本，之后自动维护完整节点安装流程。</p>';
+ const state=!r.auto_upgrade?'已停用':r.upgrade_status==='running'?'升级中':r.upgrade_attempts>=3&&r.installed_release!==r.target_release?'同版失败已达上限':r.installed_release===r.target_release?'当前版本':'等待自动升级';
+ return `<p class="hint">完整安装脚本自动升级：${state} · 当前 ${(r.installed_release||'未登记').slice(0,8)} · 目标 ${(r.target_release||'暂不可用').slice(0,8)}</p>${r.upgrade_error?`<p class="node-warning">${esc(r.upgrade_error)}</p>`:''}`;
 }
 function repairButtons(n){
  const r=n.repair||{};
- return `<button class="secondary" data-node-action="repair-setup" data-id="${n.id}">${r.configured?'重装巡检':'开启自动修复'}</button>${r.configured?`<button class="secondary" data-node-action="repair-${r.enabled&&!r.paused?'disable':'resume'}" data-id="${n.id}">${r.enabled&&!r.paused?'停用修复':r.paused?'解除暂停 / 重新计数':'启用修复'}</button>`:''}`;
+ return `<button class="secondary" data-node-action="repair-setup" data-id="${n.id}">${r.configured?(r.script_version<3?'升级安装脚本':'重装安装脚本'):'开启自动修复'}</button>${r.configured?`<button class="secondary" data-node-action="repair-${r.enabled&&!r.paused?'disable':'resume'}" data-id="${n.id}">${r.enabled&&!r.paused?'停用修复':r.paused?'解除暂停 / 重新计数':'启用修复'}</button><button class="secondary" data-node-action="upgrade-${r.auto_upgrade?'disable':'enable'}" data-id="${n.id}">${r.auto_upgrade?'停用自动升级':'启用自动升级'}</button>${r.upgrade_attempts>=3&&r.installed_release!==r.target_release?`<button class="secondary" data-node-action="upgrade-retry" data-id="${n.id}">重新尝试升级</button>`:''}`:''}`;
 }
 function drawNodes(){
  document.querySelectorAll('[data-managed-node]').forEach(d=>{if(d.open)nodeOpened.add(d.dataset.managedNode);else nodeOpened.delete(d.dataset.managedNode);});
@@ -48,9 +53,10 @@ el('node-port').oninput=()=>{if(editingNode?.protocol!=='argo'&&!nodePortEdited)
 el('managed-nodes').onclick=async e=>{
  const b=e.target.closest('[data-node-action]');if(!b)return;const n=installed.find(n=>n.id===b.dataset.id);b.disabled=true;
  try{if(b.dataset.nodeAction==='copy'){await copy(n.uri,b);return;}
+ if(b.dataset.nodeAction?.startsWith('upgrade-')){await api('/api/nodes/'+n.id+'/upgrade/'+b.dataset.nodeAction.slice(8),{});await load();return;}
  if(b.dataset.nodeAction==='repair-setup'){
  if(n.repair?.configured&&!confirm('重新生成会立即撤销旧巡检凭据，需重新在目标服务器安装。继续？'))return;
- const r=await api('/api/nodes/'+n.id+'/repair/setup',{});el('command').value=r.command;el('command-hostname').textContent='请在此节点服务器以 root 执行，安装每分钟巡检（同机共用一个定时任务）。连续 3 次失败后重启原服务，5 分钟冷却，1 小时最多 3 次后暂停。仅支持本项目安装的协议服务；旧项目迁入节点需先迁移服务。';el('command-section').hidden=false;el('command-section').scrollIntoView({block:'nearest'});await load();return;}
+ const r=await api('/api/nodes/'+n.id+'/repair/setup',{});el('command').value=r.command;el('command-hostname').textContent='请在此节点服务器以 root 执行一次升级安装脚本。将安装自动升级组件，并自动运行完整节点安装流程；以后跟随面板发布版本自动升级。连续 3 次失败后重启原服务，5 分钟冷却，1 小时最多 3 次后暂停。仅支持本项目安装的协议服务；旧项目迁入节点需先迁移服务。';el('command-section').hidden=false;el('command-section').scrollIntoView({block:'nearest'});await load();return;}
  if(['repair-disable','repair-resume'].includes(b.dataset.nodeAction)){await api('/api/nodes/'+n.id+'/repair/'+b.dataset.nodeAction.slice(7),{});await load();return;}
  if(b.dataset.nodeAction==='delete'){if(confirm('删除节点“'+n.name+'”？将从面板及所有订阅中移除，并使相关安装和更新命令失效。巡检凭据也会失效。服务器上的服务、巡检任务、Cloudflare 隧道和 DNS 会保留，需另行清理。')){await api('/api/nodes/'+n.id,undefined,'DELETE');nodeOpened.delete(n.id);await load();}return;}
  if(b.dataset.nodeAction==='cancel'){if(confirm('仅在更新命令尚未执行时取消。若已在服务器执行，请先核对实际端口；取消不会回滚远端。继续？')){await api('/api/nodes/'+n.id+'/cancel-update',{});await load();}return;}

@@ -134,6 +134,21 @@ class RepairAPITests(unittest.TestCase):
   with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT count(*) FROM node_repair WHERE node_id=?',(ident,)).fetchone()[0],0)
 
 
+ def test_upgrade_routes_auth_and_bootstrap_without_rotating_node_token(self):
+  import urllib.request,urllib.error
+  ident,_=self.installed('reality')
+  setup=json.loads(self.call('/api/nodes/'+ident+'/repair/setup',{})[1]);url=re.search(r'http://[^ ]+\.sh',setup['command'])[0].removeprefix(self.base)
+  token=url.rsplit('/',1)[1].removesuffix('.sh')
+  self.assertEqual(self.call('/repair/'+ident+'/upgrade',authed=False)[0],401)
+  req=urllib.request.Request(self.base+'/repair/'+ident+'/bootstrap',headers={'Authorization':'Bearer '+token})
+  with urllib.request.urlopen(req) as response:
+   body=response.read();self.assertIn(b'REPAIR_KEEP_TOKEN=1',body);self.assertNotIn(token.encode(),body);subprocess.run(['sh','-n'],input=body,check=True)
+  self.assertEqual(self.call('/api/nodes/'+ident+'/upgrade/disable',{},authed=False)[0],401)
+  self.assertEqual(self.call('/api/nodes/'+ident+'/upgrade/disable',{})[0],200)
+  with self.assertRaises(urllib.error.HTTPError) as error:urllib.request.urlopen(req)
+  self.assertEqual(error.exception.code,409)
+
+
 class ProtocolProbeTests(unittest.TestCase):
  def test_fallback_trace_validation_and_process_cleanup(self):
   from app import node_probe

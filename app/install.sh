@@ -8,8 +8,8 @@ cleanup() {
   if [ -f "$TMP/previous" ];then cp "$TMP/previous" "$BASE/configs/$NODE_ID.json";else rm -f "$BASE/configs/$NODE_ID.json";fi
   if [ -f "$TMP/previous.link" ];then cp "$TMP/previous.link" "$BASE/state/$NODE_ID.link";else rm -f "$BASE/state/$NODE_ID.link";fi
   for ext in pem key;do [ ! -f "$TMP/previous.$ext" ] || cp "$TMP/previous.$ext" "$BASE/state/$NODE_ID.$ext";done
-  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ];then systemctl restart auto-node-simple 9>&- >/dev/null 2>&1 || true
-  elif command -v rc-service >/dev/null 2>&1;then rc-service auto-node-simple restart 9>&- >/dev/null 2>&1 || true;fi
+  if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ];then systemctl restart auto-node-simple 7>&- 9>&- >/dev/null 2>&1 || true
+  elif command -v rc-service >/dev/null 2>&1;then rc-service auto-node-simple restart 7>&- 9>&- >/dev/null 2>&1 || true;fi
  fi
  if [ "$OK" != 1 ] && command -v curl >/dev/null && command -v jq >/dev/null; then
   jq -n '{error:"安装未完成，请查看终端输出后重试；已完成的协议不会自动删除。"}' > "$TMP/error.json"
@@ -41,6 +41,9 @@ case "$(uname -m)" in x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; *) 
 BASE=/usr/local/etc/auto-node-simple
 mkdir -p "$BASE/configs" "$BASE/state" /usr/local/lib/auto-node-simple
 chmod 700 "$BASE" "$BASE/configs" "$BASE/state"
+if [ "${NODE_INSTALL_LOCKED:-0}" != 1 ];then
+ exec 7>/run/auto-node-upgrade.lock
+ timeout 120 flock 7 || { echo '等待升级锁失败，请稍后重试';exit 1; }
 exec 9>/run/auto-node-simple.lock
 # BusyBox flock has no -w. timeout bounds the wait while FD 9 stays owned
 # by this shell, so the lock also covers downloads and service changes.
@@ -53,6 +56,7 @@ else
  esac
  exit 1
 fi
+fi
 BIN=/usr/local/bin/auto-node-singbox
 fetch() {
  asset=$1;target=$2;expected=$(jq -er --arg n "$asset" '.[$n].sha256' "$TMP/manifest")
@@ -60,7 +64,7 @@ fetch() {
  echo "下载 $asset…"
  curl -fL --retry 1 --connect-timeout 10 --max-time 180 "$PANEL/assets/$asset" -o "$TMP/binary"
  printf '%s  %s\n' "$expected" "$TMP/binary" | sha256sum -c -
- chmod 755 "$TMP/binary";mv "$TMP/binary" "$target"
+ cp "$TMP/binary" "$target.next";chmod 755 "$target.next";mv -f "$target.next" "$target"
 }
 fetch "sing-box-$ARCH" "$BIN"
 if [ "$KIND" = argo ];then fetch "cloudflared-$ARCH" /usr/local/bin/auto-node-cloudflared;fi
@@ -145,7 +149,9 @@ service_file auto-node-simple "$BIN" "run -C $BASE/configs"
 DOMAIN=$SNI
 if [ "$KIND" = argo ];then
  [ "$TUNNEL" = fixed ] || { echo '临时隧道已移除，请使用固定隧道';exit 1; }
- jq -r .tunnel_token "$TMP/options" > "$BASE/state/$NODE_ID.token"
+ if jq -e '.tunnel_token | length>0' "$TMP/options" >/dev/null;then
+  jq -r .tunnel_token "$TMP/options" > "$BASE/state/$NODE_ID.token"
+ elif [ ! -s "$BASE/state/$NODE_ID.token" ];then echo '缺少原固定隧道 Token，拒绝重建隧道';exit 1;fi
  DOMAIN=$(jq -r .tunnel_hostname "$TMP/options")
  ARGS="tunnel --no-autoupdate run --token-file $BASE/state/$NODE_ID.token"
  service_file "auto-node-$NODE_ID" /usr/local/bin/auto-node-cloudflared "$ARGS"
@@ -158,6 +164,7 @@ NAME=$(jq -r --arg suffix "$SUFFIX" '(.name | if $suffix == "-CF" and endswith("
 if [ "$KIND" = argo ];then LINK="vless://$CREDENTIAL@$ADDRESS:$CP?encryption=none&security=tls&type=ws&host=$DOMAIN&sni=$DOMAIN&path=$(printf '%s' "$WS_PATH" | jq -sRr @uri)&fp=chrome#$NAME"
 elif [ "$KIND" = reality ];then LINK="vless://$CREDENTIAL@$ADDRESS:$CP?encryption=none&security=reality&type=tcp&flow=xtls-rprx-vision&sni=$SNI&pbk=$PUBLIC&sid=$SID&fp=chrome#$NAME"
 else LINK="hysteria2://$CREDENTIAL@$ADDRESS:$CP?sni=$SNI&insecure=1&alpn=h3#$NAME";fi
+if jq -e '._upgrade_uri // empty' "$TMP/options" >/dev/null;then LINK=$(jq -r '._upgrade_uri' "$TMP/options");fi
 printf '%s\n' "$LINK" > "$BASE/state/$NODE_ID.link"
 # Existing watchers keep their credential and disabled/paused state on updates.
 if [ "$REPAIR_KEEP_TOKEN" = 1 ] && [ ! -s "$BASE/repair/$NODE_ID/curl.conf" ];then REPAIR_KEEP_TOKEN=0;fi
@@ -166,20 +173,22 @@ PANEL="$PANEL" NODE_ID="$NODE_ID" REPORT_TOKEN="$REPORT_TOKEN" REPAIR_KEEP_TOKEN
 # Units for the core, tunnel and shared timer are now loaded in one daemon-reload.
 start_service() {
  if [ "$INIT" = systemd ];then
-  systemctl enable "$1" >/dev/null;systemctl restart "$1" 9>&-;systemctl is-active --quiet "$1"
+  systemctl enable "$1" >/dev/null;systemctl restart "$1" 7>&- 9>&-;systemctl is-active --quiet "$1"
  else
-  rc-update add "$1" default >/dev/null;rc-service "$1" restart 9>&-
+  rc-update add "$1" default >/dev/null;rc-service "$1" restart 7>&- 9>&-
  fi
 }
 echo '启动协议服务…'
 start_service auto-node-simple
 if [ "$KIND" = argo ];then start_service "auto-node-$NODE_ID";fi
-jq -n --arg link "$LINK" --argjson kept "$( [ "$REPAIR_KEEP_TOKEN" = 1 ] && printf true || printf false )" '{link:$link,repair_installed:true,repair_token_kept:$kept}' > "$TMP/result"
+printf '%s\n' "$NODE_RELEASE" > "$BASE/repair/$NODE_ID/release"
+jq -n --arg link "$LINK" --arg release "$NODE_RELEASE" --argjson kept "$( [ "$REPAIR_KEEP_TOKEN" = 1 ] && printf true || printf false )" '{link:$link,repair_installed:true,repair_token_kept:$kept,installed_release:$release}' > "$TMP/result"
 OK=1
 CALLBACK_OK=0
 if curl -fsS --retry 2 --retry-all-errors --connect-timeout 5 --max-time 30 -H 'Content-Type: application/json' --data-binary @"$TMP/result" "$PANEL/result/$INSTALL_ID/$CALLBACK_TOKEN" >/dev/null;then CALLBACK_OK=1
 else echo '结果回传失败，巡检尚不能授权修复；请重试本安装命令完成回传。';fi
-flock -u 9
-if [ "$CALLBACK_OK" = 1 ];then /bin/sh /usr/local/lib/auto-node-simple/watchdog.sh "$NODE_ID" 9>&- || true;fi
+if [ "${NODE_INSTALL_LOCKED:-0}" != 1 ];then flock -u 9;flock -u 7;fi
+if [ "${NODE_INSTALL_LOCKED:-0}" = 1 ] && [ "$CALLBACK_OK" != 1 ];then exit 1;fi
+if [ "${NODE_DEFER_REPORT:-0}" != 1 ] && [ "$CALLBACK_OK" = 1 ];then /bin/sh /usr/local/lib/auto-node-simple/watchdog.sh "$NODE_ID" 7>&- 9>&- || true;fi
 printf '\n安装完成（未执行公网测活），节点链接：\n%s\n' "$LINK"
 echo '协议与轻量巡检已一起安装。每分钟短任务，无常驻巡检进程；可在节点管理中停用修复。'

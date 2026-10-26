@@ -57,6 +57,9 @@ fi
 printf '%s' '__WATCHDOG_B64__' | base64 -d > /usr/local/lib/auto-node-simple/watchdog.sh.new
 chmod 700 /usr/local/lib/auto-node-simple/watchdog.sh.new
 mv /usr/local/lib/auto-node-simple/watchdog.sh.new /usr/local/lib/auto-node-simple/watchdog.sh
+printf '%s' '__UPDATER_B64__' | base64 -d > /usr/local/lib/auto-node-simple/update.sh.new
+chmod 700 /usr/local/lib/auto-node-simple/update.sh.new
+mv /usr/local/lib/auto-node-simple/update.sh.new /usr/local/lib/auto-node-simple/update.sh
 if [ "$INIT" = systemd ];then
  cat > /etc/systemd/system/auto-node-repair.service <<EOF
 [Unit]

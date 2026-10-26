@@ -2,6 +2,7 @@
 import base64,hashlib,hmac,json,secrets,threading,time
 from fastapi import HTTPException
 from pydantic import BaseModel,Field
+from . import node_upgrade
 LOCK=threading.RLock()
 STOP=threading.Event()
 WORKER=None
@@ -17,12 +18,13 @@ def init(c):
  repair_count INTEGER NOT NULL DEFAULT 0,history TEXT NOT NULL DEFAULT '[]',
  last_action TEXT NOT NULL DEFAULT '',last_result TEXT NOT NULL DEFAULT '')''')
  if 'script_version' not in {r[1] for r in c.execute('PRAGMA table_info(node_repair)')}:c.execute('ALTER TABLE node_repair ADD COLUMN script_version INTEGER NOT NULL DEFAULT 1')
+ node_upgrade.init(c)
 
 def status(c,ident):
  r=c.execute('SELECT * FROM node_repair WHERE node_id=?',(ident,)).fetchone()
  if not r:return {'configured':False}
  n=dict(r)
- return {'configured':True,**{k:n[k] for k in ('enabled','paused','last_report','probe_at','probe_status','latency_ms','probe_error','last_repair','repair_count','last_action','last_result','local_failures','public_failures','script_version')}}
+ return {'configured':True,**{k:n[k] for k in ('enabled','paused','last_report','probe_at','probe_status','latency_ms','probe_error','last_repair','repair_count','last_action','last_result','local_failures','public_failures','script_version','auto_upgrade','installed_release','upgrade_target','upgrade_status','upgrade_error','upgrade_attempts','upgrade_at')}}|{'target_release':node_upgrade.release()}
 
 def setup(ident):
  from . import main,node_management
@@ -40,7 +42,7 @@ def authorize(c,ident,token):
 
 def installer():
  from . import main
- return (main.ROOT/'repair-install.sh').read_text().replace('__WATCHDOG_B64__',base64.b64encode((main.ROOT/'node-watchdog.sh').read_bytes()).decode())
+ return (main.ROOT/'repair-install.sh').read_text().replace('__WATCHDOG_B64__',base64.b64encode((main.ROOT/'node-watchdog.sh').read_bytes()).decode()).replace('__UPDATER_B64__',base64.b64encode((main.ROOT/'node-update.sh').read_bytes()).decode())
 
 def install_token(ident,callback_token):
  from . import main
@@ -67,6 +69,7 @@ class Report(BaseModel):
  network_ok:bool=True
  result:str=Field(default='',max_length=80)
  script_version:int=Field(default=1,ge=1,le=1000)
+ release:str=Field(default='',pattern=r'^(?:[a-f0-9]{64})?$')
 
 def report(ident,token,b):
  from . import main,node_management
@@ -77,6 +80,9 @@ def report(ident,token,b):
   local=0 if b.local_ok else n['local_failures']+1
   public=0 if b.public_ok else n['public_failures']+1
   c.execute('UPDATE node_repair SET last_report=?,local_failures=?,public_failures=?,last_result=?,script_version=? WHERE node_id=?',(now,local,public,b.result,b.script_version,ident))
+  if b.release:c.execute('UPDATE node_repair SET installed_release=? WHERE node_id=?',(b.release,ident))
+  target=node_upgrade.allowed(c,ident,n,b.script_version,b.release,b.local_ok and b.public_ok and b.network_ok)
+  if target:return {'action':'none','upgrade':{'release':target}}
   # Configuration changes and disabled/paused nodes never receive restart permits.
   if not n['enabled'] or n['paused'] or node_management.pending(c,ident) or not b.network_ok:return {'action':'none'}
   protocol_failed=n['probe_status']=='failed' and n['probe_failures']>=2 and n['probe_at']>n['last_repair'] and now-n['probe_at']<660

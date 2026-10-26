@@ -35,7 +35,7 @@ esac
     self.assertEqual(r.returncode,0,r.stderr.decode()[-1000:]);self.assertIn(b'True',r.stdout)
    original=row['result'];nid=job['id']
    code,body,_=self.call('/api/nodes/'+nid);self.assertEqual(code,200,body)
-   repair=json.loads(body)['repair'];self.assertTrue(repair['configured']);self.assertGreater(repair['last_report'],0);self.assertEqual(repair['script_version'],2)
+   repair=json.loads(body)['repair'];self.assertTrue(repair['configured']);self.assertGreater(repair['last_report'],0);self.assertEqual(repair['script_version'],3)
    self.assertTrue(Path('/etc/systemd/system/auto-node-repair.timer').exists())
    self.assertFalse(Path('/etc/systemd/system/auto-node-repair-'+nid+'.timer').exists())
    import sqlite3
@@ -53,5 +53,19 @@ esac
    if protocol=='reality':self.assertEqual(parse_qs(urlsplit(original).query)['pbk'],parse_qs(urlsplit(edited['uri']).query)['pbk'])
    r=subprocess.run(['python','-c',probe],input=edited['uri'].encode(),capture_output=True,timeout=45,cwd='/tmp',env=os.environ|{'PYTHONPATH':'/app'})
    self.assertEqual(r.returncode,0,r.stderr.decode()[-1000:]);self.assertIn(b'True',r.stdout)
-   print(protocol+': install and port update both forwarded HTTPS; automatic v2 watchdog enrollment, preserved credential, shared timer, stable identity')
+   # Simulate a new published release and exercise the real automatic full installer.
+   old_release='0'*64
+   Path('/usr/local/etc/auto-node-simple/repair/'+nid+'/release').write_text(old_release)
+   with sqlite3.connect(self.data/'simple.db') as c:
+    c.execute("UPDATE node_repair SET installed_release=?,upgrade_target='',upgrade_attempts=0,upgrade_at=0,last_report=0 WHERE node_id=?",(old_release,nid))
+   upgraded=subprocess.run(['sh','/usr/local/lib/auto-node-simple/watchdog.sh',nid],capture_output=True,timeout=180)
+   self.assertEqual(upgraded.returncode,0,upgraded.stderr.decode()[-1000:])
+   code,raw,_=self.call('/api/nodes/'+nid);self.assertEqual(code,200,raw);current=json.loads(raw)
+   self.assertEqual(current['uri'],edited['uri']);self.assertEqual(current['repair']['upgrade_status'],'ok')
+   self.assertEqual(current['repair']['installed_release'],current['repair']['target_release']);self.assertIsNone(current['pending_update'])
+   with sqlite3.connect(self.data/'simple.db') as c:self.assertEqual(c.execute('SELECT token_hash FROM node_repair WHERE node_id=?',(nid,)).fetchone()[0],old_hash)
+   self.assertTrue(Path('/usr/local/etc/auto-node-simple/upgrade-previous').exists())
+   r=subprocess.run(['python','-c',probe],input=current['uri'].encode(),capture_output=True,timeout=45,cwd='/tmp',env=os.environ|{'PYTHONPATH':'/app'})
+   self.assertEqual(r.returncode,0,r.stderr.decode()[-1000:]);self.assertIn(b'True',r.stdout)
+   print(protocol+': install, port update and automatic FULL installer upgrade passed HTTPS forwarding; identity, URI and credentials preserved')
 if __name__=='__main__':unittest.main()

@@ -61,8 +61,15 @@ else
  fi
 fi
 [ ! -f "$DIR/result" ] || RESULT=$(cat "$DIR/result")
-jq -n --argjson local "$LOCAL" --argjson public "$PUBLIC" --argjson network "$NETWORK" --arg result "$RESULT" '{local_ok:$local,public_ok:$public,network_ok:$network,result:$result,script_version:2}' > "$TMP/report"
+RELEASE='';[ ! -f "$DIR/release" ] || RELEASE=$(cat "$DIR/release")
+jq -n --arg release "$RELEASE" --argjson local "$LOCAL" --argjson public "$PUBLIC" --argjson network "$NETWORK" --arg result "$RESULT" '{local_ok:$local,public_ok:$public,network_ok:$network,result:$result,script_version:3,release:$release}' > "$TMP/report"
 if ! curl --noproxy '*' -fsS --config "$DIR/curl.conf" --connect-timeout 5 --max-time 10 -H 'Content-Type: application/json' --data-binary @"$TMP/report" "$PANEL/repair/$NODE_ID/report" -o "$TMP/control" 2>/dev/null;then exit 0;fi
+UPGRADE=$(jq -r '.upgrade.release // empty' "$TMP/control")
+if [ -n "$UPGRADE" ] && [ -x /usr/local/lib/auto-node-simple/update.sh ];then
+ flock -u 9
+ /bin/sh /usr/local/lib/auto-node-simple/update.sh "$NODE_ID" || true
+ exit 0
+fi
 ACTION=$(jq -r '.action // "none"' "$TMP/control")
 [ "$ACTION" != none ] || exit 0
 restart_service() {

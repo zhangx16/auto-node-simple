@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse,PlainTextResponse,Response
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import URLSafeTimedSerializer,BadSignature
 from pydantic import BaseModel,Field,field_validator
-from . import cloudflare,node_management,auto_repair
+from . import cloudflare,node_management,auto_repair,node_upgrade
 ROOT=Path(__file__).parent;DATA=Path(os.getenv('DATA_DIR','/app/data'));DATA.mkdir(parents=True,exist_ok=True)
 ASSETS=Path(os.getenv('ASSET_DIR','/app/assets'))
 PANEL=os.getenv('PANEL_URL','http://localhost:18901').rstrip('/')
@@ -131,13 +131,14 @@ def script(ident:str,token:str):
  cfg=json.loads(row['config']);manifest=json.loads((ASSETS/'manifest.json').read_text())
  if cfg.get('protocol')=='argo' and not cfg.get('address','').strip():cfg['address']=DEFAULT_ARGO_ADDRESS
  with conn() as c:keep_repair=bool(c.execute('SELECT 1 FROM node_repair WHERE node_id=?',(str(cfg.get('id',ident)),)).fetchone())
- values={'PANEL':PANEL,'INSTALL_ID':ident,'NODE_ID':str(cfg.get('id',ident)),'CALLBACK_TOKEN':token,'PAYLOAD':base64.b64encode(json.dumps(cfg).encode()).decode(),'MANIFEST':base64.b64encode(json.dumps(manifest).encode()).decode(),'REPORT_TOKEN':auto_repair.install_token(str(cfg.get('id',ident)),token),'REPAIR_KEEP_TOKEN':'1' if keep_repair else '0','REPAIR_INSTALLER':base64.b64encode(auto_repair.installer().encode()).decode()}
+ values={'PANEL':PANEL,'INSTALL_ID':ident,'NODE_ID':str(cfg.get('id',ident)),'CALLBACK_TOKEN':token,'PAYLOAD':base64.b64encode(json.dumps(cfg).encode()).decode(),'MANIFEST':base64.b64encode(json.dumps(manifest).encode()).decode(),'REPORT_TOKEN':auto_repair.install_token(str(cfg.get('id',ident)),token),'REPAIR_KEEP_TOKEN':'1' if keep_repair else '0','REPAIR_INSTALLER':base64.b64encode(auto_repair.installer().encode()).decode(),'NODE_RELEASE':node_upgrade.release()}
  text='#!/bin/sh\nset -eu\numask 077\n'+'\n'.join(k+'='+shlex.quote(v) for k,v in values.items())+'\n'+(ROOT/'install.sh').read_text()
  return PlainTextResponse(text,headers={'Cache-Control':'no-store'})
 class Result(BaseModel):
  link:str=Field(default='',max_length=16000);error:str=Field(default='',max_length=300)
  repair_installed:bool=False
  repair_token_kept:bool=False
+ installed_release:str=Field(default='',pattern=r'^(?:[a-f0-9]{64})?$')
 @app.post('/result/{ident}/{token}')
 def result(ident:str,token:str,b:Result):
  with node_management.LOCK:return accept_result(ident,token,b)
@@ -159,7 +160,7 @@ def accept_result(ident,token,b):
    before=formats.parse(old['uri'])
    if (parsed['kind']!=cfg['protocol'] or parsed['credential']!=cfg['credential'] or parsed['port']!=cfg['client_port'] or parsed['server'].lower()!=cfg['address'].lower() or parsed['sni']!=cfg['sni']):raise HTTPException(409,'回传连接参数与更新配置不一致')
    if parsed['kind']=='reality' and (parsed['public_key']!=before['public_key'] or parsed['short_id']!=before['short_id']):raise HTTPException(409,'Reality 身份密钥发生变化，未覆盖原节点')
-   if parsed['kind']=='argo' and cloudflare.binding(target):
+   if parsed['kind']=='argo' and cloudflare.binding(target) and not cfg.get('_upgrade_release'):
     try:cloudflare.update_port(target,cfg['port'])
     except cloudflare.CFError as exc:raise HTTPException(502,str(exc))
  with conn() as c:
@@ -172,7 +173,9 @@ def accept_result(ident,token,b):
    if target:
     c.execute('UPDATE nodes SET name=?,uri=?,config=? WHERE id=?',(name,b.link,json.dumps(stored),target));c.execute('DELETE FROM node_updates WHERE node_id=?',(target,))
    else:c.execute('INSERT OR IGNORE INTO nodes(id,name,protocol,uri,created,config) VALUES (?,?,?,?,?,?)',(ident,name,parsed['kind'],b.link,time.time(),json.dumps(stored)))
-   if b.repair_installed:auto_repair.enroll(c,target or ident,token,b.repair_token_kept)
+   if b.repair_installed:
+    auto_repair.enroll(c,target or ident,token,b.repair_token_kept)
+    if b.installed_release:c.execute("UPDATE node_repair SET installed_release=?,upgrade_status='ok',upgrade_error='' WHERE node_id=?",(b.installed_release,target or ident))
   c.execute('UPDATE installs SET status=?,result=?,error=?,config=? WHERE id=?',('done' if b.link else 'failed',b.link,b.error,'{}' if b.link else row['config'],ident))
  return {'ok':True}
 @app.get('/api/installs')
@@ -228,6 +231,31 @@ def repair_control(ident:str,action:Literal['disable','resume'],r:Request):
 @app.get('/repair/{ident}/{token}.sh')
 def repair_script(ident:str,token:str):
  return PlainTextResponse(auto_repair.script(ident,token),headers={'Cache-Control':'no-store'})
+
+@app.post('/api/nodes/{ident}/upgrade/{action}')
+def upgrade_control(ident:str,action:Literal['enable','disable','retry'],r:Request):
+ owner(r);return node_upgrade.control(ident,action)
+
+def repair_bearer(r):
+ auth=r.headers.get('authorization','')
+ if not auth.startswith('Bearer '):raise HTTPException(401,'缺少节点凭据')
+ return auth[7:]
+
+@app.get('/repair/{ident}/bootstrap')
+def upgrade_bootstrap(ident:str,r:Request):
+ return PlainTextResponse(node_upgrade.bootstrap(ident,repair_bearer(r)),headers={'Cache-Control':'no-store'})
+
+@app.get('/repair/{ident}/upgrade')
+def upgrade_bundle(ident:str,r:Request):
+ return node_upgrade.bundle(ident,repair_bearer(r))
+
+class UpgradeResult(BaseModel):
+ release:str=Field(pattern=r'^[a-f0-9]{64}$')
+ ok:bool
+
+@app.post('/repair/{ident}/upgrade-result')
+def upgrade_finished(ident:str,b:UpgradeResult,r:Request):
+ return node_upgrade.finished(ident,repair_bearer(r),b.release,b.ok)
 
 @app.post('/repair/{ident}/report')
 def repair_report(ident:str,b:auto_repair.Report,r:Request):
@@ -300,6 +328,9 @@ def asset(name:str):
  manifest=json.loads((ASSETS/'manifest.json').read_text())
  if name not in manifest:raise HTTPException(404)
  return FileResponse(ASSETS/name,media_type='application/octet-stream',headers={'Cache-Control':'public,max-age=86400'})
+@app.get('/upgrade.sh')
+def upgrade_entry():return FileResponse(ROOT/'upgrade-bootstrap.sh',media_type='text/plain',headers={'Cache-Control':'no-store'})
+
 @app.get('/health')
 def health():return {'ok':True}
 @app.get('/')
