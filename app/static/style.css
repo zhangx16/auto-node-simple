@@ -66,3 +66,5 @@ button:focus-visible,summary:focus-visible{outline:2px solid #71717a;outline-off
 #platform-port-hint{display:block;margin-top:8px;font-weight:400}#ssh-fields{border-top:1px solid var(--line);padding-top:12px;margin:20px 0}#ssh-fingerprint-status{overflow-wrap:anywhere}#remote-install-status{padding:12px;border:1px solid var(--line);border-radius:7px}
 
 .automation-panel{border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin:18px 0 24px}.automation-panel>h3{margin-top:0}.automation-panel>label{max-width:240px}.automation-batch{border-top:1px solid var(--line);padding-top:14px;margin-top:16px}.automation-batch>summary{cursor:pointer;font-weight:500;overflow-wrap:anywhere}.automation-batch ol{padding-left:22px}.automation-batch li{padding:8px 0;overflow-wrap:anywhere}.automation-batch li p{margin:4px 0}
+
+#watch-status{white-space:pre-line;overflow-wrap:anywhere}#watch-pending summary{cursor:pointer}#watch-pending p{overflow-wrap:anywhere}

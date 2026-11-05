@@ -192,7 +192,8 @@ def install_one(batch,machine,base,request):
         else:
             update(batch,vm,stage='cloudflare',message='创建独立 Cloudflare 固定隧道与安装任务')
             config=main.Install(name=machine['name'][:40]+f'-Argo-{mapping["internal_port"]}',protocol='argo',port=mapping['internal_port'],client_port=443,platform_vm_id=vm,platform_forward_id=mapping['id'])
-            result=main.create(config,request);ident=result['id'];command=result['command']
+            result=main.create_install(config) if request is None else main.create(config,request)
+            ident=result['id'];command=result['command']
             profile.update(install_id=ident,command=command);save_profile(path,profile)
         update(batch,vm,install_id=ident,stage='install',message='正在通过 SSH 安装 Argo，等待成功回传')
         # Re-check the live socket to catch services started since preflight.
@@ -232,6 +233,8 @@ def run(batch,machines,base,request):
         with main.conn() as c:
             remaining=c.execute("SELECT count(*) FROM automation_items WHERE batch_id=? AND state IN ('queued','running')",(batch,)).fetchone()[0]
             c.execute('UPDATE automation_batches SET status=?,finished=? WHERE id=?',('interrupted' if remaining else 'finished',time.time(),batch))
+        from . import platform_watch
+        platform_watch.reconcile_batch(batch)
 
 def start(vm_ids,base,key,request):
     from . import main

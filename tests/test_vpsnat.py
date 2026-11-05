@@ -177,6 +177,15 @@ class RouteTests(unittest.TestCase):
             start.assert_not_called()
         self.assertEqual(self.call(path,authed=False)[0],401)
 
+    def test_hourly_watch_endpoints_require_owner_and_same_origin(self):
+        from app import platform_watch
+        with patch.object(platform_watch,'configure') as configure,patch.object(platform_watch,'trigger') as trigger:
+            self.assertEqual(self.call('/api/vpsnat/watch',authed=False)[0],401)
+            for path,body in [('/api/vpsnat/watch',{'enabled':True}),('/api/vpsnat/watch/check',{})]:
+                self.assertEqual(self.call(path,body,'POST',authed=False)[0],401)
+                self.assertEqual(self.call(path,body,'POST',origin='https://evil.example')[0],403)
+            configure.assert_not_called();trigger.assert_not_called()
+
     def test_upstream_failure_becomes_safe_api_error(self):
         with patch.object(vpsnat,'vms',side_effect=vpsnat.APIError('平台密钥缺少所需权限')):
             self.assertEqual(self.call('/api/vpsnat/vms'),(502,{'detail':'平台密钥缺少所需权限'}))

@@ -10,7 +10,7 @@ class AutomationTests(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.old=main.DATA;main.DATA=Path(self.tmp.name)
   with main.conn() as c:
-   c.execute('CREATE TABLE installs(id TEXT PRIMARY KEY,status TEXT,created REAL)');c.execute('CREATE TABLE nodes(id TEXT PRIMARY KEY)');auto.init(c)
+   c.execute("CREATE TABLE installs(id TEXT PRIMARY KEY,status TEXT,created REAL,error TEXT DEFAULT '')");c.execute('CREATE TABLE nodes(id TEXT PRIMARY KEY)');auto.init(c)
  def tearDown(self):main.DATA=self.old;self.tmp.cleanup()
  def test_port_selection_checks_both_sides_and_live_listeners(self):
   rows=[{'internal_port':38001,'public_port':40001},{'internal_port':10001,'public_port':38002}]
@@ -72,6 +72,25 @@ class AutomationTests(unittest.TestCase):
    auto.install_one('batch',{'id':'123'},38001,None);probe.assert_called_once_with('fixture-uri');request.assert_not_called()
   with main.conn() as c:
    row=c.execute('SELECT state,verified FROM automation_items').fetchone();self.assertEqual(tuple(row),('done',1))
+ def test_background_install_uses_internal_helper_without_browser_session(self):
+  from app import remote_install,node_probe
+  import time
+  with main.conn() as c:
+   remote_install.init(c);c.execute('ALTER TABLE nodes ADD COLUMN uri TEXT')
+   c.execute("INSERT INTO automation_batches(id,status) VALUES ('batch','running')")
+   c.execute("INSERT INTO automation_items(batch_id,vm_id,state) VALUES ('batch','123','queued')")
+  def reset(vm,profile,path):profile.update(password='fixture-private-password',reset_state='confirmed')
+  def mapping(vm,base,profile,path,ports,used):
+   profile.update(port=38001,public_port=38001,mapping_id='7');return {'id':'7','internal_port':38001,'public_port':38001}
+  def create(config):
+   with main.conn() as c:
+    c.execute('INSERT INTO installs(id,status,created) VALUES (?,?,?)',('new','done',time.time()));c.execute('INSERT INTO nodes VALUES (?,?)',('new','fixture-uri'))
+   return {'id':'new','command':'fixed-generated-command'}
+  with patch.object(vpsnat,'forwards',return_value=[]),patch.object(auto,'discover_ssh',return_value={'host':'example.com','forward_id':'1','fingerprint':'SHA256:fixture'}),patch.object(auto,'reset_password',side_effect=reset),patch.object(remote_install,'connect',return_value=MagicMock()),patch.object(auto,'listeners',return_value=set()),patch.object(auto,'managed_mapping',side_effect=mapping),patch.object(main,'create_install',side_effect=create) as internal,patch.object(main,'create') as public,patch.object(auto,'execute',return_value=(1,'')),patch.object(remote_install,'worker') as worker,patch.object(node_probe,'probe',return_value=5):
+   auto.install_one('batch',{'id':'123','name':'New','status':'running'},38001,None)
+   internal.assert_called_once();public.assert_not_called();self.assertEqual(worker.call_args.args[0],'new')
+  with main.conn() as c:
+   row=c.execute('SELECT state,message FROM automation_items').fetchone();self.assertEqual(row['state'],'done',row['message'])
  def test_restart_marks_unknown_without_repeating_mutations(self):
   with main.conn() as c:
    c.execute("INSERT INTO automation_batches(id,status) VALUES ('batch','running')")

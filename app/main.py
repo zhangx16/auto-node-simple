@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse,PlainTextResponse,Response
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import URLSafeTimedSerializer,BadSignature
 from pydantic import BaseModel,Field,field_validator
-from . import cloudflare,node_management,auto_repair,node_upgrade,vpsnat,remote_install,platform_automation
+from . import cloudflare,node_management,auto_repair,node_upgrade,vpsnat,remote_install,platform_automation,platform_watch
 ROOT=Path(__file__).parent;DATA=Path(os.getenv('DATA_DIR','/app/data'));DATA.mkdir(parents=True,exist_ok=True)
 ASSETS=Path(os.getenv('ASSET_DIR','/app/assets'))
 PANEL=os.getenv('PANEL_URL','http://localhost:18901').rstrip('/')
@@ -33,6 +33,7 @@ with conn() as c:
  if 'target_node' not in {r[1] for r in c.execute('PRAGMA table_info(installs)')}:c.execute("ALTER TABLE installs ADD COLUMN target_node TEXT NOT NULL DEFAULT ''")
  remote_install.init(c)
  platform_automation.init(c)
+ platform_watch.init(c)
  cloudflare.init(c)
  from . import formats
  for row in c.execute("SELECT * FROM installs WHERE status='done' AND result!='' AND target_node=''").fetchall():
@@ -45,6 +46,8 @@ app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
 app.add_event_handler('startup',remote_install.recover)
 app.add_event_handler('startup',platform_automation.recover)
 app.add_event_handler('startup',auto_repair.start)
+app.add_event_handler('startup',platform_watch.start)
+app.add_event_handler('shutdown',platform_watch.stop)
 app.add_event_handler('shutdown',auto_repair.stop)
 def owner(r):
  try:signer.loads(r.cookies.get('simple_session',''),max_age=86400)
@@ -99,7 +102,9 @@ def download_command(url):
 
 @app.post('/api/installs')
 def create(b:Install,r:Request):
- owner(r)
+ owner(r);return create_install(b)
+
+def create_install(b:Install):
  if b.platform_vm_id:
   try:
    machine=vpsnat.vm(b.platform_vm_id)
@@ -196,6 +201,7 @@ def accept_result(ident,token,b):
     auto_repair.enroll(c,target or ident,token,b.repair_token_kept)
     if b.installed_release:c.execute("UPDATE node_repair SET installed_release=?,upgrade_status='ok',upgrade_error='' WHERE node_id=?",(b.installed_release,target or ident))
   c.execute('UPDATE installs SET status=?,result=?,error=?,config=? WHERE id=?',('done' if b.link else 'failed',b.link,b.error,'{}' if b.link else row['config'],ident))
+ if b.link:platform_watch.enroll_node(target or ident)
  return {'ok':True}
 @app.get('/api/installs')
 def listing(r:Request):
@@ -435,5 +441,24 @@ def platform_automate_argo(b:ArgoAutomation,r:Request):
 @app.get('/api/vpsnat/automation/argo')
 def platform_automation_status(r:Request):
  owner(r);return platform_automation.listing()
+
+class PlatformWatchSettings(BaseModel):
+ enabled:bool
+ base_port:int|None=Field(default=None,ge=1024,le=65535)
+ subscription_id:str|None=Field(default=None,max_length=64)
+
+@app.get('/api/vpsnat/watch')
+def platform_watch_status(r:Request):
+ owner(r);return platform_watch.status()
+
+@app.post('/api/vpsnat/watch')
+def platform_watch_configure(b:PlatformWatchSettings,r:Request):
+ owner(r)
+ try:return platform_watch.configure(b.enabled,b.base_port,b.subscription_id)
+ except vpsnat.APIError as exc:raise HTTPException(exc.status,str(exc))
+
+@app.post('/api/vpsnat/watch/check')
+def platform_watch_check(r:Request):
+ owner(r);return platform_watch.trigger()
 
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
