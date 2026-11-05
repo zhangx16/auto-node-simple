@@ -1,4 +1,4 @@
-"""Three protocols, command installation and results. No agent or background worker."""
+"""Protocol installs, node subscriptions, and explicit VPSNAT SSH automation."""
 import base64,hashlib,hmac,json,os,secrets,shlex,sqlite3,time,re,ipaddress
 from pathlib import Path
 from typing import Literal
@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse,PlainTextResponse,Response
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import URLSafeTimedSerializer,BadSignature
 from pydantic import BaseModel,Field,field_validator
-from . import cloudflare,node_management,auto_repair,node_upgrade
+from . import cloudflare,node_management,auto_repair,node_upgrade,vpsnat,remote_install,platform_automation
 ROOT=Path(__file__).parent;DATA=Path(os.getenv('DATA_DIR','/app/data'));DATA.mkdir(parents=True,exist_ok=True)
 ASSETS=Path(os.getenv('ASSET_DIR','/app/assets'))
 PANEL=os.getenv('PANEL_URL','http://localhost:18901').rstrip('/')
@@ -31,6 +31,8 @@ with conn() as c:
  node_management.init(c)
  auto_repair.init(c)
  if 'target_node' not in {r[1] for r in c.execute('PRAGMA table_info(installs)')}:c.execute("ALTER TABLE installs ADD COLUMN target_node TEXT NOT NULL DEFAULT ''")
+ remote_install.init(c)
+ platform_automation.init(c)
  cloudflare.init(c)
  from . import formats
  for row in c.execute("SELECT * FROM installs WHERE status='done' AND result!='' AND target_node=''").fetchall():
@@ -40,6 +42,8 @@ with conn() as c:
  node_management.migrate_argo_suffix(c)
 os.chmod(DATA/'simple.db',0o600)
 app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
+app.add_event_handler('startup',remote_install.recover)
+app.add_event_handler('startup',platform_automation.recover)
 app.add_event_handler('startup',auto_repair.start)
 app.add_event_handler('shutdown',auto_repair.stop)
 def owner(r):
@@ -62,6 +66,8 @@ def login(b:Login,r:Request):
 def logout(r:Request):
  owner(r);res=PlainTextResponse('ok');res.delete_cookie('simple_session');return res
 class Install(BaseModel):
+ platform_vm_id:str=Field(default='',pattern=r'^(?:[1-9][0-9]*)?$')
+ platform_forward_id:str=Field(default='',pattern=r'^(?:[1-9][0-9]*)?$')
  name:str=Field(default='我的节点',min_length=1,max_length=60)
  protocol:Literal['argo','reality','hysteria2']='argo'
  port:int=Field(default=18080,ge=1024,le=65535)
@@ -94,6 +100,18 @@ def download_command(url):
 @app.post('/api/installs')
 def create(b:Install,r:Request):
  owner(r)
+ if b.platform_vm_id:
+  try:
+   machine=vpsnat.vm(b.platform_vm_id)
+   if b.protocol!='argo' or b.platform_forward_id:
+    mapping=next((p for p in vpsnat.forwards(b.platform_vm_id) if p['id']==b.platform_forward_id),None)
+    if not mapping or mapping['protocol']!=('udp' if b.protocol=='hysteria2' else 'tcp') or mapping['internal_port']!=b.port:raise HTTPException(422,'请选择与协议及监听端口一致的平台映射')
+    if b.protocol!='argo':
+     b.client_port=mapping['public_port'];b.address=mapping['public_ip'] or machine['public_ip'] or b.address
+     Install.host(b.address)
+  except vpsnat.APIError as exc:raise HTTPException(exc.status,str(exc))
+  except ValueError:raise HTTPException(422,'平台公网地址格式无效，请手动填写连接地址')
+ elif b.platform_forward_id:raise HTTPException(422,'映射必须关联平台实例')
  if b.protocol!='argo' and not b.address:raise HTTPException(422,'直连协议必须填写公网连接地址')
  if b.protocol=='argo' and b.client_port not in (443,2053,2083,2087,2096,8443):raise HTTPException(422,'Argo 客户端需使用 Cloudflare HTTPS 端口')
  automatic=b.protocol=='argo' and b.cf_mode=='default' and not b.tunnel_token
@@ -104,7 +122,8 @@ def create(b:Install,r:Request):
  if b.protocol=='argo' and not cfg['address'].strip():cfg['address']=DEFAULT_ARGO_ADDRESS
  if b.protocol!='argo' or b.tunnel!='fixed':cfg['tunnel_token']=''
  with conn() as c:
-  c.execute("DELETE FROM installs WHERE created<?",(time.time()-86400,))
+  remote_install.init(c)
+  c.execute("DELETE FROM installs WHERE created<? AND id NOT IN (SELECT id FROM remote_installs WHERE status IN ('running','unknown'))",(time.time()-86400,))
   if c.execute('SELECT count(*) FROM installs').fetchone()[0]>=100:raise HTTPException(409,'安装记录已满，请稍后重试')
   c.execute('INSERT INTO installs(id,token_hash,config,status,created) VALUES (?,?,?,?,?)',(ident,hashlib.sha256(token.encode()).hexdigest(),json.dumps(cfg),'ready',time.time()))
  if automatic:
@@ -181,8 +200,8 @@ def accept_result(ident,token,b):
 @app.get('/api/installs')
 def listing(r:Request):
  owner(r)
- with conn() as c:rows=c.execute('SELECT id,status,created,result,error FROM installs WHERE created>? ORDER BY created DESC LIMIT 20',(time.time()-86400,)).fetchall()
- return [dict(x) for x in rows]
+ with conn() as c:rows=c.execute("SELECT id,status,created,result,error FROM installs WHERE created>? OR id IN (SELECT id FROM remote_installs WHERE status IN ('running','unknown')) ORDER BY CASE WHEN id IN (SELECT id FROM remote_installs WHERE status IN ('running','unknown')) THEN 0 ELSE 1 END,created DESC LIMIT 100",(time.time()-86400,)).fetchall()
+ with conn() as c:return [dict(x)|{'remote':remote_install.status(c,x['id'])} for x in rows]
 
 @app.get('/api/nodes')
 def nodes(r:Request):
@@ -335,4 +354,86 @@ def upgrade_entry():return FileResponse(ROOT/'upgrade-bootstrap.sh',media_type='
 def health():return {'ok':True}
 @app.get('/')
 def home():return FileResponse(ROOT/'static/index.html',headers={'Cache-Control':'no-store'})
+# Platform operations use the same authenticated owner boundary as node management.
+def platform_call(fn,*args):
+ try:return fn(*args)
+ except vpsnat.APIError as exc:raise HTTPException(exc.status,str(exc))
+
+@app.get('/api/vpsnat/status')
+def platform_status(r:Request):owner(r);return vpsnat.status()
+@app.get('/api/vpsnat/vms')
+def platform_vms(r:Request):owner(r);return platform_call(vpsnat.vms)
+@app.get('/api/vpsnat/vms/{vm_id}')
+def platform_vm(vm_id:str,r:Request):owner(r);return platform_call(vpsnat.vm,vm_id)
+@app.get('/api/vpsnat/vms/{vm_id}/port-forwards')
+def platform_forwards(vm_id:str,r:Request):owner(r);return platform_call(vpsnat.forwards,vm_id)
+
+class PlatformForward(BaseModel):
+ internal_port:int=Field(ge=1,le=65535)
+ protocol:Literal['tcp','udp']='tcp'
+ public_port:int|None=Field(default=None,ge=1,le=65535)
+
+@app.post('/api/vpsnat/vms/{vm_id}/port-forwards')
+def platform_add_forward(vm_id:str,b:PlatformForward,r:Request):
+ owner(r);vm_id=platform_call(vpsnat.identifier,vm_id)
+ platform_call(vpsnat.mutate,'POST','/vms/'+vm_id+'/port-forwards',{'guest_port':b.internal_port,'protocol':b.protocol}|({'host_port':b.public_port} if b.public_port is not None else {}),r.headers.get('idempotency-key'))
+ return {'ok':True,'message':'平台已接受创建请求，请刷新映射列表确认'}
+
+@app.delete('/api/vpsnat/vms/{vm_id}/port-forwards/{port_id}')
+def platform_delete_forward(vm_id:str,port_id:str,r:Request):
+ owner(r);vm_id=platform_call(vpsnat.identifier,vm_id);port_id=platform_call(vpsnat.identifier,port_id)
+ platform_call(vpsnat.mutate,'DELETE','/vms/'+vm_id+'/port-forwards/'+port_id,None,r.headers.get('idempotency-key'))
+ return {'ok':True}
+
+@app.post('/api/vpsnat/vms/{vm_id}/port-forwards/{port_id}/change')
+def platform_change_forward(vm_id:str,port_id:str,r:Request):
+ owner(r);vm_id=platform_call(vpsnat.identifier,vm_id);port_id=platform_call(vpsnat.identifier,port_id)
+ platform_call(vpsnat.mutate,'POST','/vms/'+vm_id+'/port-forwards/'+port_id+'/change',None,r.headers.get('idempotency-key'))
+ return {'ok':True,'message':'平台已接受换端口请求，请刷新映射并核对已有节点的客户端端口'}
+
+@app.post('/api/vpsnat/vms/{vm_id}/actions/{action}')
+def platform_action(vm_id:str,action:Literal['start','stop','restart'],r:Request):
+ owner(r);vm_id=platform_call(vpsnat.identifier,vm_id)
+ platform_call(vpsnat.mutate,'POST','/vms/'+vm_id+'/'+action,None,r.headers.get('idempotency-key'))
+ return {'ok':True,'message':'平台已接受操作，请刷新实例状态'}
+
+class RemoteDeploy(BaseModel):
+ install:Install
+ ssh:remote_install.SSHLogin
+
+@app.post('/api/vpsnat/vms/{vm_id}/ssh-probe')
+def platform_ssh_probe(vm_id:str,b:remote_install.SSHProbe,r:Request):
+ owner(r);platform_call(vpsnat.identifier,vm_id)
+ return remote_install.probe(vm_id,b)
+
+@app.post('/api/vpsnat/vms/{vm_id}/deploy')
+def platform_deploy(vm_id:str,b:RemoteDeploy,r:Request):
+ owner(r);platform_call(vpsnat.identifier,vm_id)
+ return remote_install.start(vm_id,b.install,b.ssh,r)
+
+@app.post('/api/installs/{ident}/remote-acknowledge')
+def remote_acknowledge(ident:str,r:Request):
+ owner(r)
+ with conn() as c:
+  row=c.execute('SELECT status FROM installs WHERE id=?',(ident,)).fetchone()
+  remote=c.execute('SELECT status FROM remote_installs WHERE id=?',(ident,)).fetchone()
+  if not remote:raise HTTPException(404,'远程安装任务不存在')
+  if remote['status']=='running':raise HTTPException(409,'安装仍在执行，请等待结束')
+  c.execute("UPDATE remote_installs SET status='acknowledged',message='已由管理员核对远端状态' WHERE id=?",(ident,))
+ return {'ok':True}
+
+class ArgoAutomation(BaseModel):
+ vm_ids:list[str]=Field(default_factory=list,max_length=100)
+ base_port:int=Field(default=38001,ge=1024,le=65535)
+
+@app.post('/api/vpsnat/automation/argo')
+def platform_automate_argo(b:ArgoAutomation,r:Request):
+ owner(r)
+ try:return platform_automation.start(b.vm_ids,b.base_port,r.headers.get('idempotency-key'),r)
+ except vpsnat.APIError as exc:raise HTTPException(exc.status,str(exc))
+
+@app.get('/api/vpsnat/automation/argo')
+def platform_automation_status(r:Request):
+ owner(r);return platform_automation.listing()
+
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')

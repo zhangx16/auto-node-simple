@@ -65,7 +65,7 @@ class CloudflareTests(unittest.TestCase):
   self.assertEqual(cfg['tunnel_hostname'],'assigned.example.com');self.assertEqual(cfg['tunnel_token'],'fixture-connector-token')
   self.assertEqual(cfg['address'],'www.cloudflare.com')
  def test_custom_address_wins_and_direct_address_is_not_defaulted(self):
-  r=main.create(main.Install(cf_mode='manual',tunnel_hostname='manual.example.com',tunnel_token='fixture-token',address='custom.example.com'),self.request)
+  r=main.create(main.Install(cf_mode='manual',tunnel_hostname='manual.other.com',tunnel_token='fixture-token',address='custom.example.com'),self.request)
   with cf.db() as c:cfg=json.loads(c.execute('SELECT config FROM installs WHERE id=?',(r['id'],)).fetchone()[0])
   self.assertEqual(cfg['address'],'custom.example.com')
   with self.assertRaises(HTTPException) as e:main.create(main.Install(protocol='reality'),self.request)
@@ -73,7 +73,7 @@ class CloudflareTests(unittest.TestCase):
  def test_manual_and_direct_modes_do_not_call_default_api(self):
   with patch.object(cf,'provision') as provision:
    main.create(main.Install(protocol='reality',address='1.1.1.1'),self.request)
-   main.create(main.Install(cf_mode='manual',tunnel_hostname='manual.example.com',tunnel_token='fixture-manual-token'),self.request)
+   main.create(main.Install(cf_mode='manual',tunnel_hostname='manual.other.com',tunnel_token='fixture-manual-token'),self.request)
    provision.assert_not_called()
  def test_default_failure_is_visible_and_not_returned_as_ready_command(self):
   with patch.object(cf,'provision',side_effect=cf.CFError('fixture rejected')):
