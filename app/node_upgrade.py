@@ -13,7 +13,7 @@ def release():
  from . import main
  if not (main.ASSETS/'manifest.json').is_file():return ''
  h=hashlib.sha256()
- for name in ('install.sh','repair-install.sh','node-watchdog.sh','node-update.sh'):
+ for name in ('install.sh','repair-install.sh','node-watchdog.sh','node-update.sh','argo-health.sh'):
   h.update(name.encode()+b'\0'+(main.ROOT/name).read_bytes()+b'\0')
  h.update((main.ASSETS/'manifest.json').read_bytes())
  return h.hexdigest()

@@ -60,6 +60,9 @@ mv /usr/local/lib/auto-node-simple/watchdog.sh.new /usr/local/lib/auto-node-simp
 printf '%s' '__UPDATER_B64__' | base64 -d > /usr/local/lib/auto-node-simple/update.sh.new
 chmod 700 /usr/local/lib/auto-node-simple/update.sh.new
 mv /usr/local/lib/auto-node-simple/update.sh.new /usr/local/lib/auto-node-simple/update.sh
+printf '%s' '__ARGO_HEALTH_B64__' | base64 -d > /usr/local/lib/auto-node-simple/argo-health.sh.new
+chmod 700 /usr/local/lib/auto-node-simple/argo-health.sh.new
+mv /usr/local/lib/auto-node-simple/argo-health.sh.new /usr/local/lib/auto-node-simple/argo-health.sh
 if [ "$INIT" = systemd ];then
  cat > /etc/systemd/system/auto-node-repair.service <<EOF
 [Unit]

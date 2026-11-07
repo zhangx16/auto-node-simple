@@ -46,9 +46,21 @@ command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "18901", "--
 3. Argo 仅支持固定隧道。可手动提供隧道 Token 与公开主机名，或按下一节配置自动创建。客户端地址留空使用 `www.cloudflare.com`；需要其他优选域名或 IP 时自行填写。固定隧道域名仍用于 TLS SNI 与 WebSocket Host。
 4. 生成安装命令，在目标服务器以 root 执行。命令 24 小时有效，成功后不可重新下载。
 
-支持 Alpine / Debian / Ubuntu，amd64 / arm64，systemd / OpenRC。安装成功表示本地配置与服务启动完成，不表示公网连通性已验证。Hysteria2 默认使用自签证书，导出链接启用 `insecure=1`。
+支持 Alpine / Debian / Ubuntu，amd64 / arm64，systemd / OpenRC。Argo 安装成功前须通过实际 HTTPS 转发及间隔复测；Reality / Hysteria2 的安装成功仍仅表示本地配置与服务启动完成，不表示公网连通性已验证。Hysteria2 默认使用自签证书，导出链接启用 `insecure=1`。
 
 同机节点共享专用 sing-box 核心，增加节点或修改监听参数会重启该核心，造成短暂中断。Argo 每个节点使用独立 cloudflared 服务。
+
+### Argo 传输自动评估
+
+默认 `argo_protocol=auto`：安装器分别强制运行 QUIC 和 HTTP/2，用临时 sing-box 客户端按实际节点地址、端口、SNI、路径及 UUID 请求外部 HTTPS，并间隔 12 秒复测。每种传输最多尝试两轮，只有实际转发通过才参与选择。两种都通过时，QUIC 的平均请求耗时须比 HTTP/2 低超过 20% 才优先采用，否则选择 HTTP/2，避免短时采样波动。两种都失败则安装失败，不回传成功节点。
+
+这是安装时的短时稳定性及 HTTPS 请求耗时评估，不是带宽测速，也不能保证未来线路状态。QUIC 需允许到 Cloudflare 的出站 UDP 7844，HTTP/2 需允许出站 TCP 7844；NAT 机器无需为隧道增加入站映射。API 可设置 `argo_protocol=http2` 或 `quic`，指定 QUIC 验收失败时仍会尝试 HTTP/2。
+
+选择结果保存在 `/usr/local/etc/auto-node-simple/state/<节点ID>.transport`，面板节点管理显示实际传输。安装器会同步 systemd drop-in / OpenRC 配置，避免旧的覆盖配置让评估测错协议。已有节点自动升级时也会重新评估，切换期间连接会短暂中断。
+
+公网 WS 连续失败获得修复授权后，巡检先固定 HTTP/2 再重启，并执行真实 HTTPS 转发复查；只有复查通过才标记已验证恢复。保持原有冷却、次数上限和手动停用规则。公网隧道已坏但本地服务、出站网络正常的节点也可领取修复升级。
+
+托管 Cloudflare 的监听端口更新会在验收前切换对应回源路由，失败时尝试恢复原路由。手动管理隧道的端口修改仍需用户先在 Cloudflare 同步回源端口。
 
 ## Cloudflare 自动创建
 

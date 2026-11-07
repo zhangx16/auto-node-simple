@@ -1,5 +1,5 @@
 #!/bin/sh
-# Minute job; never reconfigure nodes or rotate identities.
+# Minute job; bounded transport fallback, never rotate node identities.
 set -eu
 umask 077
 export MALLOC_ARENA_MAX=1
@@ -62,7 +62,8 @@ else
 fi
 [ ! -f "$DIR/result" ] || RESULT=$(cat "$DIR/result")
 RELEASE='';[ ! -f "$DIR/release" ] || RELEASE=$(cat "$DIR/release")
-jq -n --arg release "$RELEASE" --argjson local "$LOCAL" --argjson public "$PUBLIC" --argjson network "$NETWORK" --arg result "$RESULT" '{local_ok:$local,public_ok:$public,network_ok:$network,result:$result,script_version:3,release:$release}' > "$TMP/report"
+ARGO_TRANSPORT='';[ ! -f "$BASE/state/$NODE_ID.transport" ] || ARGO_TRANSPORT=$(cat "$BASE/state/$NODE_ID.transport")
+jq -n --arg transport "$ARGO_TRANSPORT" --arg release "$RELEASE" --argjson local "$LOCAL" --argjson public "$PUBLIC" --argjson network "$NETWORK" --arg result "$RESULT" '{local_ok:$local,public_ok:$public,network_ok:$network,result:$result,script_version:3,release:$release,argo_transport:$transport}' > "$TMP/report"
 if ! curl --noproxy '*' -fsS --config "$DIR/curl.conf" --connect-timeout 5 --max-time 10 -H 'Content-Type: application/json' --data-binary @"$TMP/report" "$PANEL/repair/$NODE_ID/report" -o "$TMP/control" 2>/dev/null;then exit 0;fi
 UPGRADE=$(jq -r '.upgrade.release // empty' "$TMP/control")
 if [ -n "$UPGRADE" ] && [ -x /usr/local/lib/auto-node-simple/update.sh ];then
@@ -77,6 +78,27 @@ restart_service() {
  elif command -v rc-service >/dev/null;then timeout 35 rc-service "$1" restart 9>&-
  else return 1;fi
 }
+prefer_http2() {
+ printf 'http2\n' > "$BASE/state/$NODE_ID.transport"
+ # Transport only: preserve the tunnel token, URI, UUID and listening port.
+ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null;then
+  transport_dir="/etc/systemd/system/auto-node-$NODE_ID.service.d"
+  mkdir -p "$transport_dir"
+  printf '[Service]\nEnvironment=TUNNEL_TRANSPORT_PROTOCOL=http2\n' > "$transport_dir/transport.conf.next"
+  mv "$transport_dir/transport.conf.next" "$transport_dir/transport.conf"
+  systemctl daemon-reload
+ elif command -v rc-service >/dev/null;then
+  mkdir -p /etc/conf.d
+  printf 'export TUNNEL_TRANSPORT_PROTOCOL=http2\n' > "/etc/conf.d/auto-node-$NODE_ID"
+ fi
+}
+verify_tunnel() {
+ if /bin/sh /usr/local/lib/auto-node-simple/argo-health.sh "$NODE_ID" --stable >/dev/null;then
+  RESULT="${RESULT}_verified"
+ else
+  RESULT=forwarding_failed
+ fi
+}
 RESULT=restart_failed
 case "$ACTION" in
  core|protocol)
@@ -88,11 +110,17 @@ case "$ACTION" in
    if /usr/local/bin/auto-node-singbox check -C "$BASE/configs" >/dev/null 2>&1 && restart_service auto-node-simple >/dev/null 2>&1;then RESULT=core_restarted;fi
   else RESULT=shared_core_cooldown;fi
   if [ "$ACTION" = protocol ] && [ "$KIND" = argo ];then
+   if [ "$PUBLIC" = false ];then prefer_http2;fi
    if restart_service "auto-node-$NODE_ID" >/dev/null 2>&1;then
     [ "$RESULT" != core_restarted ] || RESULT=core_and_tunnel_restarted
+    verify_tunnel
    else RESULT=restart_failed;fi
   fi ;;
- tunnel) if [ "$KIND" = argo ] && restart_service "auto-node-$NODE_ID" >/dev/null 2>&1;then RESULT=tunnel_restarted;fi ;;
+ tunnel)
+  if [ "$KIND" = argo ];then
+   if [ "$PUBLIC" = false ];then prefer_http2;fi
+   if restart_service "auto-node-$NODE_ID" >/dev/null 2>&1;then RESULT=tunnel_restarted;verify_tunnel;fi
+  fi ;;
  *) exit 0 ;;
 esac
 printf '%s\n' "$RESULT" > "$DIR/result"

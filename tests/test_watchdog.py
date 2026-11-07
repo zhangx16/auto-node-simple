@@ -7,7 +7,7 @@ class WatchdogShellTests(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name)
   self.base=self.root/'base';self.bin=self.root/'bin';self.bin.mkdir();self.node='abc123'
   self.state=self.base/'repair'/self.node;self.state.mkdir(parents=True)
-  (self.base/'configs').mkdir();(self.base/'state').mkdir();(self.root/'systemd').mkdir();(self.root/'units').mkdir();(self.root/'lib').mkdir()
+  (self.base/'configs').mkdir();(self.base/'state').mkdir();(self.root/'systemd').mkdir();(self.root/'units').mkdir();(self.root/'lib').mkdir();(self.root/'lib'/'argo-health.sh').write_text('exit 0\n')
   self.log=self.root/'calls';self.control=self.root/'control';self.control.write_text('{"action":"none"}')
   self.env=os.environ|{'PATH':str(self.bin)+':'+os.environ['PATH'],'MOCK_LOG':str(self.log),'MOCK_CONTROL':str(self.control)}
   (self.state/'settings.json').write_text(json.dumps({'protocol':'argo','hostname':'fixed.example.com','panel':'https://panel.example.com'}));(self.state/'curl.conf').write_text('')
@@ -27,7 +27,7 @@ elif '-w' in a:print('101',end='')
  def fake(self,name,text):
   p=self.bin/name;p.write_text(text);p.chmod(0o755)
  def rewrite(self,text):
-  return text.replace('/usr/local/etc/auto-node-simple',str(self.base)).replace('/usr/local/lib/auto-node-simple',str(self.root/'lib')).replace('/usr/local/bin/auto-node-singbox',str(self.core)).replace('/run/auto-node-simple.lock',str(self.root/'lock')).replace('/run/auto-node-repair.lock',str(self.root/'runner-lock')).replace('/run/systemd/system',str(self.root/'systemd')).replace('/etc/systemd/system',str(self.root/'units')).replace('export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','export PATH='+str(self.bin)+':'+os.environ['PATH'])
+  return text.replace('/usr/local/etc/auto-node-simple',str(self.base)).replace('/usr/local/lib/auto-node-simple',str(self.root/'lib')).replace('/usr/local/bin/auto-node-singbox',str(self.core)).replace('/run/auto-node-upgrade.lock',str(self.root/'upgrade-lock')).replace('/etc/conf.d',str(self.root/'conf.d')).replace('/run/auto-node-simple.lock',str(self.root/'lock')).replace('/run/auto-node-repair.lock',str(self.root/'runner-lock')).replace('/run/systemd/system',str(self.root/'systemd')).replace('/etc/systemd/system',str(self.root/'units')).replace('export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','export PATH='+str(self.bin)+':'+os.environ['PATH'])
  def run_watchdog(self):
   script=self.root/'watchdog';script.write_text(self.rewrite((APP/'node-watchdog.sh').read_text()))
   p=subprocess.run(['sh',str(script),self.node],env=self.env,capture_output=True,timeout=15)
@@ -36,7 +36,7 @@ elif '-w' in a:print('101',end='')
   self.run_watchdog();self.assertFalse(self.log.exists())
   self.control.write_text('{"action":"tunnel"}');self.run_watchdog()
   self.assertEqual(self.log.read_text().splitlines(),['restart auto-node-abc123'])
-  self.assertEqual((self.state/'result').read_text().strip(),'tunnel_restarted')
+  self.assertEqual((self.state/'result').read_text().strip(),'tunnel_restarted_verified')
  def test_shared_core_cooldown_and_config_check_failure(self):
   self.control.write_text('{"action":"core"}');self.run_watchdog();self.run_watchdog()
   self.assertEqual(self.log.read_text().splitlines(),['restart auto-node-simple'])
@@ -46,7 +46,7 @@ elif '-w' in a:print('101',end='')
  def test_installer_creates_timer_and_does_not_modify_protocol(self):
   import base64
   original=(self.base/'configs'/f'{self.node}.json').read_bytes()
-  text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(self.rewrite((APP/'node-watchdog.sh').read_text()).encode()).decode())
+  text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__ARGO_HEALTH_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(self.rewrite((APP/'node-watchdog.sh').read_text()).encode()).decode())
   script=self.root/'setup';script.write_text('set -eu\numask 077\nPANEL=https://panel.example.com\nNODE_ID=abc123\nREPORT_TOKEN=fixture-report-token\n'+self.rewrite(text))
   p=subprocess.run(['sh',str(script)],env=self.env,capture_output=True,timeout=15)
   self.assertEqual(p.returncode,0,p.stderr.decode());self.assertEqual((self.base/'configs'/f'{self.node}.json').read_bytes(),original)
@@ -59,7 +59,7 @@ elif '-w' in a:print('101',end='')
   self.fake('crontab','#!/bin/sh\nif [ "$1" = -l ];then cat "$MOCK_CONTROL";else cp "$1" "$MOCK_CONTROL";fi\n')
   # curl report needs JSON; leave watchdog body inert for this installation-path test.
   self.control.write_text('0 0 * * * unrelated-job\n* * * * * old-node-job # simple-repair-abc123\n')
-  text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(b'exit 0\n').decode())
+  text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__ARGO_HEALTH_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(b'exit 0\n').decode())
   text=self.rewrite(text).replace(str(self.root/'systemd'),str(self.root/'no-systemd'))
   script=self.root/'setup';script.write_text('set -eu\numask 077\nPANEL=https://panel.example.com\nNODE_ID=abc123\nREPORT_TOKEN=fixture-report-token\n'+text)
   for _ in range(2):
@@ -89,14 +89,14 @@ elif '-w' in a:print('101',end='')
   (self.state/'curl.conf').write_text('original-credential')
   original=(self.state/'settings.json').read_bytes()
   self.fake('systemctl','#!/bin/sh\n[ "$1" != enable ]\n')
-  script=self.root/'setup';text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(b'exit 0\n').decode())
+  script=self.root/'setup';text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__ARGO_HEALTH_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(b'exit 0\n').decode())
   script.write_text('set -eu\numask 077\nPANEL=https://new.example.com\nNODE_ID=abc123\nREPORT_TOKEN=new-token\n'+self.rewrite(text))
   p=subprocess.run(['sh',str(script)],env=self.env,capture_output=True,timeout=15)
   self.assertNotEqual(p.returncode,0);self.assertEqual((self.state/'curl.conf').read_text(),'original-credential');self.assertEqual((self.state/'settings.json').read_bytes(),original)
  def test_upgrade_consolidates_only_owned_old_timers_and_cron(self):
   import base64
   for name in ['auto-node-repair-abc123.timer','auto-node-repair-abc123.service','unrelated.timer']:(self.root/'units'/name).write_text('fixture')
-  text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(b'exit 0\n').decode())
+  text=(APP/'repair-install.sh').read_text().replace('__UPDATER_B64__','ZXhpdCAwCg==').replace('__ARGO_HEALTH_B64__','ZXhpdCAwCg==').replace('__WATCHDOG_B64__',base64.b64encode(b'exit 0\n').decode())
   script=self.root/'setup';script.write_text('set -eu\numask 077\nPANEL=https://panel.example.com\nNODE_ID=abc123\nREPORT_TOKEN=fixture\n'+self.rewrite(text))
   p=subprocess.run(['sh',str(script)],env=self.env,capture_output=True,timeout=15)
   self.assertEqual(p.returncode,0,p.stderr.decode());self.assertFalse((self.root/'units'/'auto-node-repair-abc123.timer').exists());self.assertTrue((self.root/'units'/'unrelated.timer').exists())

@@ -24,10 +24,12 @@ paths() {
 /usr/local/bin/auto-node-cloudflared
 $LIB/watchdog.sh
 $LIB/update.sh
+$LIB/argo-health.sh
 $BASE/configs/$NODE_ID.json
 $BASE/configs/base.json
 $BASE/state/$NODE_ID.link
 $BASE/state/$NODE_ID.token
+$BASE/state/$NODE_ID.transport
 $BASE/state/$NODE_ID.key
 $BASE/state/$NODE_ID.pem
 $DIR/settings.json
@@ -35,6 +37,8 @@ $DIR/curl.conf
 $DIR/release
 /etc/systemd/system/auto-node-simple.service
 /etc/systemd/system/auto-node-$NODE_ID.service
+/etc/systemd/system/auto-node-$NODE_ID.service.d/transport.conf
+/etc/conf.d/auto-node-$NODE_ID
 /etc/systemd/system/auto-node-repair.service
 /etc/systemd/system/auto-node-repair.timer
 /etc/init.d/auto-node-simple

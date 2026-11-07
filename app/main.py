@@ -78,6 +78,7 @@ class Install(BaseModel):
  client_port:int=Field(default=443,ge=1,le=65535)
  sni:str=Field(default='www.amd.com',min_length=1,max_length=253)
  tunnel:Literal['fixed']='fixed'
+ argo_protocol:Literal['http2','auto','quic']='auto'
  cf_mode:Literal['default','manual']='default'
  tunnel_token:str=Field(default='',max_length=4096)
  tunnel_hostname:str=Field(default='',max_length=253)
@@ -163,6 +164,27 @@ class Result(BaseModel):
  repair_installed:bool=False
  repair_token_kept:bool=False
  installed_release:str=Field(default='',pattern=r'^(?:[a-f0-9]{64})?$')
+ argo_transport:Literal['','http2','quic']=''
+
+@app.post('/result/{ident}/{token}/route/{action}')
+def prepare_argo_route(ident:str,token:str,action:Literal['prepare','rollback']):
+ # An authenticated existing install may change only its own managed origin port.
+ with node_management.LOCK:
+  row=authorized(ident,token)
+  if row['status']=='done':return {'ok':True}
+  if row['status']=='cancelled':raise HTTPException(409,'更新已取消')
+  cfg=json.loads(row['config']);target=row.get('target_node','')
+  if not target or cfg.get('protocol')!='argo' or cfg.get('_upgrade_release') or not cloudflare.binding(target):raise HTTPException(409,'此任务不能切换回源端口')
+  with conn() as c:
+   old=node_management.get(c,target)
+   update=c.execute('SELECT base_uri FROM node_updates WHERE node_id=? AND job_id=?',(target,ident)).fetchone()
+   if not update or update['base_uri']!=old['uri']:raise HTTPException(409,'更新已失效')
+  port=cfg['port'] if action=='prepare' else node_management.config(old).get('port')
+  if not port:raise HTTPException(409,'缺少原监听端口，无法安全切换')
+  try:cloudflare.update_port(target,port)
+  except cloudflare.CFError as exc:raise HTTPException(502,str(exc))
+  return {'ok':True}
+
 @app.post('/result/{ident}/{token}')
 def result(ident:str,token:str,b:Result):
  with node_management.LOCK:return accept_result(ident,token,b)
@@ -199,6 +221,7 @@ def accept_result(ident,token,b):
    else:c.execute('INSERT OR IGNORE INTO nodes(id,name,protocol,uri,created,config) VALUES (?,?,?,?,?,?)',(ident,name,parsed['kind'],b.link,time.time(),json.dumps(stored)))
    if b.repair_installed:
     auto_repair.enroll(c,target or ident,token,b.repair_token_kept)
+    if b.argo_transport:c.execute('UPDATE node_repair SET argo_transport=? WHERE node_id=?',(b.argo_transport,target or ident))
     if b.installed_release:c.execute("UPDATE node_repair SET installed_release=?,upgrade_status='ok',upgrade_error='' WHERE node_id=?",(b.installed_release,target or ident))
   c.execute('UPDATE installs SET status=?,result=?,error=?,config=? WHERE id=?',('done' if b.link else 'failed',b.link,b.error,'{}' if b.link else row['config'],ident))
  if b.link:platform_watch.enroll_node(target or ident)
