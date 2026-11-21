@@ -41,6 +41,8 @@ with conn() as c:
    p=formats.parse(row['result']);c.execute('INSERT OR IGNORE INTO nodes(id,name,protocol,uri,created) VALUES (?,?,?,?,?)',(row['id'],p['name'],p['kind'],row['result'],row['created']))
   except (ValueError,TypeError):pass
  node_management.migrate_argo_suffix(c)
+ from .deletion_history import purge_completed
+ purge_completed(c)
 os.chmod(DATA/'simple.db',0o600)
 app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
 app.add_event_handler('startup',remote_install.recover)

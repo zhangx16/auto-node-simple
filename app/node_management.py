@@ -84,7 +84,9 @@ def cancel(ident):
 
 def delete(ident):
  from . import main
+ from .deletion_history import purge_completed
  with main.conn() as c:
+  purge_completed(c)
   get(c,ident)
   # Remove source jobs too: startup migrates completed installs into nodes.
   # Deleting jobs also revokes their script and callback tokens.
